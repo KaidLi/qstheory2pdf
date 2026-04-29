@@ -29,6 +29,7 @@
 \DeclareVoidOption{kindle}{\ekv{device=kindle}}
 \DeclareVoidOption{normal}{\ekv{device=normal}}
 \DeclareVoidOption{screen}{\ekv{device=screen}}
+\DeclareVoidOption{scribe}{\ekv{device=scribe}}
 
 \DeclareStringOption[cn]{lang}
 \DeclareVoidOption{cn}{\ekv{lang=cn}}
@@ -118,7 +119,18 @@
     \RequirePackage[UTF8,scheme=plain,fontset=none]{ctex}}{\relax}
 
   \ifdefstring{\ELEGANT@chinesefont}{ctexfont}{
-    \RequirePackage[UTF8,scheme=plain]{ctex}}{\relax}
+    \RequirePackage[UTF8,scheme=plain,fontset=windows]{ctex}
+    \setCJKmainfont{宋体}
+    \setCJKsansfont{黑体}
+    \setCJKmonofont{楷体}
+    \setCJKfamilyfont{zhsong}{宋体}
+    \setCJKfamilyfont{zhhei}{黑体}
+    \setCJKfamilyfont{zhkai}{楷体}
+    \setCJKfamilyfont{zhfs}{仿宋}
+    \providecommand{\songti}{\CJKfamily{zhsong}}
+    \providecommand{\heiti}{\CJKfamily{zhhei}}
+    \providecommand{\kaishu}{\CJKfamily{zhkai}}
+    \providecommand{\fangsong}{\CJKfamily{zhfs}}}{\relax}
   
   \AfterEndPreamble{
     \setlength\parindent{2\ccwd}}
@@ -370,7 +382,7 @@
     a4paper}}{%
   \relax}
 
-\ifdefstring{\ELEGANT@device}{screen}{%  
+\ifdefstring{\ELEGANT@device}{screen}{%
   \geometry{
     screen,
     paperwidth=25.4cm,
@@ -380,15 +392,29 @@
     footskip=0.6cm}}{%
   \relax}
 
+\ifdefstring{\ELEGANT@device}{scribe}{%
+  \geometry{
+    margin=5mm,
+    paperwidth=5.83in,
+    paperheight=7.76in,
+    includefoot}}{%
+  \relax}
+
 % headings
 \RequirePackage{fancyhdr}
-\renewcommand{\headrulewidth}{1pt}
+\renewcommand{\headrulewidth}{0.4pt}
 \renewcommand{\footrulewidth}{0pt}
+
+\def\issuevolume{}
 
 \fancypagestyle{fancy-note}{
   \fancyhf{} % clear header/footer settings
   \fancyfoot[C]{\footnotesize \thepage}
-  \fancyhead[C]{仅供内部人员学习参考，不得用于任何非法目的}
+  \ifx\issuevolume\empty
+    \fancyhead[C]{}
+  \else
+    \fancyhead[C]{\footnotesize\kaishu \issuevolume}
+  \fi
 }
 
 \fancypagestyle{plain}{%
