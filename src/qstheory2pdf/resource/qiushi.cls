@@ -120,13 +120,6 @@
 
   \ifdefstring{\ELEGANT@chinesefont}{ctexfont}{
     \RequirePackage[UTF8,scheme=plain,fontset=windows]{ctex}
-    \setCJKmainfont{宋体}
-    \setCJKsansfont{黑体}
-    \setCJKmonofont{楷体}
-    \setCJKfamilyfont{zhsong}{宋体}
-    \setCJKfamilyfont{zhhei}{黑体}
-    \setCJKfamilyfont{zhkai}{楷体}
-    \setCJKfamilyfont{zhfs}{仿宋}
     \providecommand{\songti}{\CJKfamily{zhsong}}
     \providecommand{\heiti}{\CJKfamily{zhhei}}
     \providecommand{\kaishu}{\CJKfamily{zhkai}}
