@@ -98,7 +98,7 @@ uv run qstheory2pdf -s https://www.qstheory.cn/20260415/94280df5956349b0954c44d7
 
 ## 跨平台字体设置
 
-项目默认使用 Windows 中文字体集（宋体/黑体/楷体/仿宋）。在 **macOS 或 Linux** 上运行时，需要同时修改字体集和字体名映射。在 `src/qstheory2pdf/resource/qiushi.cls` 中执行以下替换：
+项目默认使用 Windows 中文字体集（宋体/黑体/楷体/仿宋）。在 **macOS 或 Linux** 上运行时，由于没有 Windows 系统字体，需要做两步修改。在 `src/qstheory2pdf/resource/qiushi.cls` 中：
 
 **1）切换字体集**（第 122 行）：
 ```diff
@@ -106,25 +106,25 @@ uv run qstheory2pdf -s https://www.qstheory.cn/20260415/94280df5956349b0954c44d7
 + \RequirePackage[UTF8,scheme=plain,fontset=fandol]{ctex}
 ```
 
-**2）映射中文字体名**（第 123-129 行）：
+**2）注释掉显式字体覆盖**（第 123-129 行）——ctex 的 `fontset=fandol` 已经正确配置了 FandolSong/Hei/Kai/Fang 四套字体，qiushi.cls 的显式 `\setCJKmainfont` 反而会覆盖掉 ctex 的配置，且 fontspec 在 Linux 上找不到 "FandolSong" 这类字体名：
 ```diff
-- \setCJKmainfont{宋体}
-- \setCJKsansfont{黑体}
-- \setCJKmonofont{楷体}
-- \setCJKfamilyfont{zhsong}{宋体}
-- \setCJKfamilyfont{zhhei}{黑体}
-- \setCJKfamilyfont{zhkai}{楷体}
-- \setCJKfamilyfont{zhfs}{仿宋}
-+ \setCJKmainfont{FandolSong}
-+ \setCJKsansfont{FandolHei}
-+ \setCJKmonofont{FandolKai}
-+ \setCJKfamilyfont{zhsong}{FandolSong}
-+ \setCJKfamilyfont{zhhei}{FandolHei}
-+ \setCJKfamilyfont{zhkai}{FandolKai}
-+ \setCJKfamilyfont{zhfs}{FandolFang}
+-     \setCJKmainfont{宋体}
+-     \setCJKsansfont{黑体}
+-     \setCJKmonofont{楷体}
+-     \setCJKfamilyfont{zhsong}{宋体}
+-     \setCJKfamilyfont{zhhei}{黑体}
+-     \setCJKfamilyfont{zhkai}{楷体}
+-     \setCJKfamilyfont{zhfs}{仿宋}
++ %    \setCJKmainfont{宋体}
++ %    \setCJKsansfont{黑体}
++ %    \setCJKmonofont{楷体}
++ %    \setCJKfamilyfont{zhsong}{宋体}
++ %    \setCJKfamilyfont{zhhei}{黑体}
++ %    \setCJKfamilyfont{zhkai}{楷体}
++ %    \setCJKfamilyfont{zhfs}{仿宋}
 ```
 
-> **为什么两步都要改**：仅切换 `fontset=fandol` 不够——`qiushi.cls` 加载 ctex 后又通过 `\setCJKmainfont{宋体}` 覆盖了字体。Linux 上不存在名为"宋体"的字体，必须映射为 Fandol 对应的 FandolSong 等。
+> **为什么不能直接映射字体名**：把 `宋体` 改成 `FandolSong` 看似合理，但 fontspec 在 Linux 上无法通过 "FandolSong" 这个名字找到字体（它与 Windows 上的 "宋体" 不同，后者是注册在系统字体表里的）。正确做法是注释掉覆盖，让 ctex 的 `fontset=fandol` 全权负责——它内部使用正确的字体文件名（如 `FandolSong-Regular.otf`），四种字体（宋/黑/楷/仿）的区别和层级完全保留。
 
 Fandol 字体随 `texlive-lang-chinese` 一起安装，无需额外配置。
 
@@ -145,7 +145,7 @@ PDF 文件默认保存到当前目录下的 `output/` 文件夹，文件名由�
 3. 未发布 → 构建 PDF → 发布 Release 并上传附件
 4. 已发布 → 跳过
 
-**字体**：CI 环境自动完成上方的 fandol 字体映射，无需额外配置。
+**字体**：CI 环境自动完成字体切换和覆盖注释，无需额外配置。
 
 ## 故障排查
 
