@@ -1,7 +1,9 @@
 """CLI entry point for qstheory2pdf."""
 
 import argparse
+import os
 import re
+import shutil
 import sys
 
 # Force UTF-8 output on Windows, where the terminal defaults to GBK
@@ -9,6 +11,13 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from qstheory2pdf import QiuShiCrawler, PDFGenerator
+
+
+def _cleanup_img_dir() -> None:
+    """Remove the downloaded image cache directory."""
+    img_dir = os.path.join(os.getcwd(), "img")
+    if os.path.isdir(img_dir):
+        shutil.rmtree(img_dir)
 
 
 def main() -> None:
@@ -103,6 +112,7 @@ def main() -> None:
         print(f"PDF已生成: {output}")
 
     print("完成!")
+    _cleanup_img_dir()
 
 
 if __name__ == "__main__":

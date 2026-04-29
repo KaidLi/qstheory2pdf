@@ -108,19 +108,10 @@ class PDFGenerator:
             "xelatex not found. Install TeX Live: https://tug.org/texlive/"
         )
 
-    def _cleanup(self, keep_tex: bool = False) -> None:
-        """Remove temporary build artifacts."""
-        if not self.tmpdir:
-            return
-        suffixes = ["aux", "bcf", "log", "out", "run.xml", "bbl", "blg"]
-        for fname in os.listdir(self.tmpdir):
-            if any(fname.endswith("." + s) for s in suffixes):
-                os.remove(os.path.join(self.tmpdir, fname))
-        if not keep_tex:
-            for fname in os.listdir(self.tmpdir):
-                if fname.endswith(".tex"):
-                    os.remove(os.path.join(self.tmpdir, fname))
-        # keep qiushi.cls, PDF, img dir
+    def _cleanup(self) -> None:
+        """Remove the temporary working directory."""
+        if self.tmpdir and os.path.isdir(self.tmpdir):
+            shutil.rmtree(self.tmpdir)
 
     # -------------------------------------------------------------- single mode
 
