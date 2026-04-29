@@ -1,4 +1,4 @@
-name: Build Latest Issue
+name: Build and Release PDF
 
 on:
   schedule:
@@ -10,6 +10,18 @@ on:
       url:
         description: 'TOC URL（留空则自动发现最新期）'
         required: false
+      device:
+        description: '阅读设备预设'
+        required: false
+        type: choice
+        default: 'normal'
+        options:
+          - normal
+          - pad
+          - kindle
+          - screen
+          - pc
+          - scribe
 
 jobs:
   build:
@@ -25,8 +37,10 @@ jobs:
 
       - name: Install TeX Live
         run: |
-          sudo apt-get update
-          sudo apt-get install -y texlive-xetex texlive-latex-extra texlive-lang-chinese
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            texlive-xetex texlive-latex-recommended texlive-latex-extra \
+            texlive-lang-chinese
 
       - name: Map fonts for Linux
         run: |
@@ -61,7 +75,10 @@ jobs:
 
       - name: Build PDF
         if: steps.check.outputs.exists == 'false'
-        run: uv run qstheory2pdf "${{ steps.discover.outputs.url }}"
+        run: |
+          uv run qstheory2pdf \
+            -d "${{ inputs.device || 'normal' }}" \
+            "${{ steps.discover.outputs.url }}"
 
       - name: Create Release
         if: steps.check.outputs.exists == 'false'
@@ -70,4 +87,19 @@ jobs:
           tag_name: ${{ steps.discover.outputs.tag }}
           name: 求是 ${{ steps.discover.outputs.volume }}
           files: output/*.pdf
-          generate_release_notes: true
+          body: |
+            | | |
+            |---|---|
+            | **期号** | ${{ steps.discover.outputs.volume }} |
+            | **来源** | ${{ steps.discover.outputs.url }} |
+            | **设备** | ${{ inputs.device || 'normal' }} |
+
+            由 [qstheory2pdf](https://github.com/${{ github.repository }}) 自动生成。
+
+      - name: Upload PDF artifact
+        if: steps.check.outputs.exists == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.discover.outputs.tag }}
+          path: output/*.pdf
+          retention-days: 30

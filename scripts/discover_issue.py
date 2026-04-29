@@ -43,7 +43,7 @@ def _result(url: str, year: str, num: int) -> dict:
     return {
         "url": url,
         "volume": f"{year}年第{num:02d}期",
-        "tag": f"{year}-{num:02d}",
+        "tag": f"qstheory-{year}-{num:02d}",
     }
 
 
@@ -119,7 +119,7 @@ def main() -> None:
                 result = {
                     "url": url,
                     "volume": f"{m.group(1)}年{m.group(2)}月",
-                    "tag": f"{m.group(1)}-{m.group(2)}",
+                    "tag": f"qstheory-{m.group(1)}-{m.group(2)}",
                 }
 
     # --- Auto-discovery ---

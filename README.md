@@ -98,18 +98,54 @@ uv run qstheory2pdf -s https://www.qstheory.cn/20260415/94280df5956349b0954c44d7
 
 ## 跨平台字体设置
 
-项目默认使用 Windows 中文字体集。如果你在 **macOS 或 Linux** 上运行，需要修改 `src/qstheory2pdf/resource/qiushi.cls` 第 122 行：
+项目默认使用 Windows 中文字体集（宋体/黑体/楷体/仿宋）。在 **macOS 或 Linux** 上运行时，需要同时修改字体集和字体名映射。在 `src/qstheory2pdf/resource/qiushi.cls` 中执行以下替换：
 
+**1）切换字体集**（第 122 行）：
 ```diff
 - \RequirePackage[UTF8,scheme=plain,fontset=windows]{ctex}
 + \RequirePackage[UTF8,scheme=plain,fontset=fandol]{ctex}
 ```
 
-Fandol 字体随 `texlive-lang-chinese` 一起安装，通常无需额外配置。
+**2）映射中文字体名**（第 123-129 行）：
+```diff
+- \setCJKmainfont{宋体}
+- \setCJKsansfont{黑体}
+- \setCJKmonofont{楷体}
+- \setCJKfamilyfont{zhsong}{宋体}
+- \setCJKfamilyfont{zhhei}{黑体}
+- \setCJKfamilyfont{zhkai}{楷体}
+- \setCJKfamilyfont{zhfs}{仿宋}
++ \setCJKmainfont{FandolSong}
++ \setCJKsansfont{FandolHei}
++ \setCJKmonofont{FandolKai}
++ \setCJKfamilyfont{zhsong}{FandolSong}
++ \setCJKfamilyfont{zhhei}{FandolHei}
++ \setCJKfamilyfont{zhkai}{FandolKai}
++ \setCJKfamilyfont{zhfs}{FandolFang}
+```
+
+> **为什么两步都要改**：仅切换 `fontset=fandol` 不够——`qiushi.cls` 加载 ctex 后又通过 `\setCJKmainfont{宋体}` 覆盖了字体。Linux 上不存在名为"宋体"的字体，必须映射为 Fandol 对应的 FandolSong 等。
+
+Fandol 字体随 `texlive-lang-chinese` 一起安装，无需额外配置。
 
 ## 输出
 
-PDF 文件默认保存到当前目录下的 `output/` 文件夹，文件名由文章标题或期号自动生成。
+PDF 文件默认保存到当前目录下的 `output/` 文件夹，文件名由文章标题或期号自动生成。生成完成后自动清理下载的临时文件（`img/` 图片缓存和 xelatex 编译临时目录）。
+
+## GitHub Actions 自动发布
+
+项目配置了 GitHub Actions，每月 1 日和 16 日自动发现并构建最新一期《求是》，发布到 [Releases](https://github.com/KaidLi/qstheory2pdf/releases)。
+
+**手动触发**：在 Actions 页面选择 _Build and Release PDF_ → _Run workflow_，可选填 TOC URL 和设备类型。
+
+**工作原理**：
+
+1. 定时触发（或手动）→ 从 [全年目录页](https://www.qstheory.cn/qs/mulu.htm) 自动发现最新期 URL
+2. 检查该期是否已发布过 Release（按 tag `qstheory-2026-08` 去重）
+3. 未发布 → 构建 PDF → 发布 Release 并上传附件
+4. 已发布 → 跳过
+
+**字体**：CI 环境自动完成上方的 fandol 字体映射，无需额外配置。
 
 ## 故障排查
 
