@@ -4,6 +4,10 @@ import argparse
 import re
 import sys
 
+# Force UTF-8 output on Windows, where the terminal defaults to GBK
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from qstheory2pdf import QiuShiCrawler, PDFGenerator
 
 

@@ -31,7 +31,7 @@ class PDFGenerator:
 
     def __init__(self, device: str = "normal") -> None:
         resource_path = os.path.join(
-            os.path.dirname(qiushi2pdf.__file__), "resource"
+            os.path.dirname(qstheory2pdf.__file__), "resource"
         )
         self.template_path = os.path.join(resource_path, "template.tex")
         self.cls_path = os.path.join(resource_path, "qiushi.cls")
@@ -144,7 +144,7 @@ class PDFGenerator:
 
         for key in ["title", "author", "volume"]:
             tex = tex.replace(f"==xx({key})xx==", info.get(key, ""))
-        tex = tex.replace("==xx(qrcode)xx==", info.get("qrcode", ""))
+        tex = tex.replace("==xx(qrcode)xx==", info.get("qrcode", "").replace("\\", "/"))
 
         # build body
         body = self._build_body(info["content"])
