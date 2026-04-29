@@ -49,11 +49,22 @@ jobs:
 
       - name: Map fonts for Linux
         run: |
-          sed -i 's/fontset=windows/fontset=fandol/' src/qstheory2pdf/resource/qiushi.cls
-          sed -i 's/{宋体}/{FandolSong}/g' src/qstheory2pdf/resource/qiushi.cls
-          sed -i 's/{黑体}/{FandolHei}/g'  src/qstheory2pdf/resource/qiushi.cls
-          sed -i 's/{楷体}/{FandolKai}/g'  src/qstheory2pdf/resource/qiushi.cls
-          sed -i 's/{仿宋}/{FandolFang}/g' src/qstheory2pdf/resource/qiushi.cls
+          uv run python -c "
+          path = 'src/qstheory2pdf/resource/qiushi.cls'
+          with open(path, 'r', encoding='utf-8') as f:
+              lines = f.readlines()
+          with open(path, 'w', encoding='utf-8') as f:
+              for line in lines:
+                  # Switch fontset
+                  line = line.replace('fontset=windows', 'fontset=fandol')
+                  # Comment out explicit font overrides — ctex fontset handles these
+                  if any(kw in line for kw in ['宋体', '黑体', '楷体', '仿宋']):
+                      if 'setCJK' in line:
+                          f.write('%' + line)
+                          continue
+                  f.write(line)
+          print('Font mapping done')
+          "
 
       - name: Discover latest issue
         id: discover
