@@ -1,0 +1,73 @@
+name: Build Latest Issue
+
+on:
+  schedule:
+    # 每月 1 日和 16 日 UTC 18:37（北京时间次日 02:37）
+    # 37 分错峰，避免整点抢占
+    - cron: '37 18 1,16 * *'
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'TOC URL（留空则自动发现最新期）'
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install TeX Live
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y texlive-xetex texlive-latex-extra texlive-lang-chinese
+
+      - name: Map fonts for Linux
+        run: |
+          sed -i 's/fontset=windows/fontset=fandol/' src/qstheory2pdf/resource/qiushi.cls
+          sed -i 's/{宋体}/{FandolSong}/g' src/qstheory2pdf/resource/qiushi.cls
+          sed -i 's/{黑体}/{FandolHei}/g'  src/qstheory2pdf/resource/qiushi.cls
+          sed -i 's/{楷体}/{FandolKai}/g'  src/qstheory2pdf/resource/qiushi.cls
+          sed -i 's/{仿宋}/{FandolFang}/g' src/qstheory2pdf/resource/qiushi.cls
+
+      - name: Discover latest issue
+        id: discover
+        run: |
+          uv run python scripts/discover_issue.py ${{ github.event.inputs.url }} > issue.json
+          cat issue.json
+          {
+            echo "url=$(jq -r .url issue.json)"
+            echo "volume=$(jq -r .volume issue.json)"
+            echo "tag=$(jq -r .tag issue.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check if already released
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ steps.discover.outputs.tag }}" &>/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release ${{ steps.discover.outputs.tag }} 已存在，跳过构建"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build PDF
+        if: steps.check.outputs.exists == 'false'
+        run: uv run qstheory2pdf "${{ steps.discover.outputs.url }}"
+
+      - name: Create Release
+        if: steps.check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.discover.outputs.tag }}
+          name: 求是 ${{ steps.discover.outputs.volume }}
+          files: output/*.pdf
+          generate_release_notes: true
