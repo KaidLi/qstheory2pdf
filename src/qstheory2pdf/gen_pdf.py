@@ -69,17 +69,17 @@ class PDFGenerator:
         for i in range(2):
             if verbose:
                 print(f"  编译 PDF (第{i+1}遍)...", end=" ", flush=True)
-            try:
-                result = subprocess.run(
-                    [xelatex, "-interaction=nonstopmode", tex_file],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    cwd=cwd,
-                    env=env,
-                    check=True,
-                )
-            except subprocess.CalledProcessError:
-                # Print xelatex log tail for diagnostics
+            result = subprocess.run(
+                [xelatex, "-interaction=nonstopmode", tex_file],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=cwd,
+                env=env,
+                check=False,
+            )
+            pdf_path = os.path.join(cwd, basename + ".pdf")
+            if result.returncode != 0 and not os.path.exists(pdf_path):
+                # Real error — PDF wasn't produced; print log for diagnostics
                 log_path = os.path.join(cwd, basename + ".log")
                 if os.path.exists(log_path):
                     print("\n--- xelatex 错误日志 (末尾) ---")
@@ -88,7 +88,9 @@ class PDFGenerator:
                         for line in lines[-40:]:
                             print(line.rstrip())
                     print("--- 日志结束 ---")
-                raise
+                raise RuntimeError(
+                    f"xelatex failed (exit {result.returncode}) and no PDF was generated"
+                )
             if verbose:
                 # count pages from output for user feedback
                 out = result.stdout.decode("utf-8", errors="replace")
