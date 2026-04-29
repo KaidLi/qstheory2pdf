@@ -39,8 +39,13 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
-            texlive-xetex texlive-latex-recommended texlive-latex-extra \
-            texlive-fonts-recommended texlive-lang-chinese
+            texlive-xetex \
+            texlive-latex-recommended \
+            texlive-latex-extra \
+            texlive-fonts-recommended \
+            texlive-fonts-extra \
+            texlive-bibtex-extra \
+            texlive-lang-chinese
 
       - name: Map fonts for Linux
         run: |
