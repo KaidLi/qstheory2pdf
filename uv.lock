@@ -628,30 +628,6 @@ wheels = [
 ]
 
 [[package]]
-name = "qiushi2pdf"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "lxml" },
-    { name = "pillow", version = "10.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
-    { name = "pillow", version = "11.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.9.*'" },
-    { name = "pillow", version = "12.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
-    { name = "qrcode", version = "7.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
-    { name = "qrcode", version = "8.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
-    { name = "requests", version = "2.32.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
-    { name = "requests", version = "2.32.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.9.*'" },
-    { name = "requests", version = "2.33.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "lxml" },
-    { name = "pillow", specifier = ">=10.4.0" },
-    { name = "qrcode" },
-    { name = "requests" },
-]
-
-[[package]]
 name = "qrcode"
 version = "7.4.2"
 source = { registry = "https://pypi.org/simple" }
@@ -682,6 +658,30 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/8f/b2/7fc2931bfae0af02d5f53b174e9cf701adbb35f39d69c2af63d4a39f81a9/qrcode-8.2.tar.gz", hash = "sha256:35c3f2a4172b33136ab9f6b3ef1c00260dd2f66f858f24d88418a015f446506c", size = 43317, upload-time = "2025-05-01T15:44:24.726Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/dd/b8/d2d6d731733f51684bbf76bf34dab3b70a9148e8f2cef2bb544fccec681a/qrcode-8.2-py3-none-any.whl", hash = "sha256:16e64e0716c14960108e85d853062c9e8bba5ca8252c0b4d0231b9df4060ff4f", size = 45986, upload-time = "2025-05-01T15:44:22.781Z" },
+]
+
+[[package]]
+name = "qstheory2pdf"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "lxml" },
+    { name = "pillow", version = "10.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
+    { name = "pillow", version = "11.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.9.*'" },
+    { name = "pillow", version = "12.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+    { name = "qrcode", version = "7.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
+    { name = "qrcode", version = "8.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
+    { name = "requests", version = "2.32.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
+    { name = "requests", version = "2.32.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.9.*'" },
+    { name = "requests", version = "2.33.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "lxml" },
+    { name = "pillow", specifier = ">=10.4.0" },
+    { name = "qrcode" },
+    { name = "requests" },
 ]
 
 [[package]]

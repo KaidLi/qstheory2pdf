@@ -1,4 +1,4 @@
-# qiushi2pdf
+# qstheory2pdf
 
 将求是网（qstheory.cn）文章转换为 PDF，支持单篇文章和整期杂志两种模式。
 
@@ -13,8 +13,8 @@
 ## 安装
 
 ```bash
-git clone https://github.com/fengdongfa1995/qiushi2pdf.git
-cd qiushi2pdf
+git clone https://github.com/KaidLi/qstheory2pdf.git
+cd qstheory2pdf
 uv sync
 ```
 
@@ -27,7 +27,7 @@ pip install .
 ## 使用方法
 
 ```
-qiushi2pdf [-d 设备] [-o 输出路径] [-s] <url>
+qstheory2pdf [-d 设备] [-o 输出路径] [-s] <url>
 ```
 
 | 参数 | 说明 |
@@ -53,25 +53,25 @@ qiushi2pdf [-d 设备] [-o 输出路径] [-s] <url>
 单篇文章：
 
 ```bash
-qiushi2pdf https://www.qstheory.cn/20260415/eb2be76d239d4fa4a0ef3a9a9d82b970/c.html
+qstheory2pdf https://www.qstheory.cn/20260415/eb2be76d239d4fa4a0ef3a9a9d82b970/c.html
 ```
 
 整期杂志（工具会自动识别目录页，下载全部文章并合并为一个 PDF）：
 
 ```bash
-qiushi2pdf https://www.qstheory.cn/20260415/94280df5956349b0954c44d728bb75a1/c.html
+qstheory2pdf https://www.qstheory.cn/20260415/94280df5956349b0954c44d728bb75a1/c.html
 ```
 
 指定设备和输出路径：
 
 ```bash
-qiushi2pdf -d kindle -o my.pdf https://www.qstheory.cn/20260415/xxx/c.html
+qstheory2pdf -d kindle -o my.pdf https://www.qstheory.cn/20260415/xxx/c.html
 ```
 
 强制单篇模式（目录页 URL 也只取当前页内容）：
 
 ```bash
-qiushi2pdf -s https://www.qstheory.cn/20260415/94280df5956349b0954c44d728bb75a1/c.html
+qstheory2pdf -s https://www.qstheory.cn/20260415/94280df5956349b0954c44d728bb75a1/c.html
 ```
 
 ## 输出

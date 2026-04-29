@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import tempfile
 
-import qiushi2pdf
+import qstheory2pdf
 
 
 def _escape_latex(text: str) -> str:

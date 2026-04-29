@@ -1,17 +1,17 @@
-"""CLI entry point for qiushi2pdf."""
+"""CLI entry point for qstheory2pdf."""
 
 import argparse
 import re
 import sys
 
-from qiushi2pdf import QiuShiCrawler, PDFGenerator
+from qstheory2pdf import QiuShiCrawler, PDFGenerator
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="qiushi2pdf",
+        prog="qstheory2pdf",
         description="将求是网文章/整期杂志转换为PDF",
-        epilog="示例: qiushi2pdf -d scribe https://www.qstheory.cn/.../c.html",
+        epilog="示例: qstheory2pdf -d scribe https://www.qstheory.cn/.../c.html",
     )
     parser.add_argument("url", help="文章或目录页URL")
     parser.add_argument(
