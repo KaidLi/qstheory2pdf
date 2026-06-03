@@ -7,29 +7,38 @@ Usage:
     python scripts/discover_issue.py <toc-url>   # use provided URL, extract metadata
 
 Output: JSON with keys: url, volume, tag
+
+Network errors (timeouts, connection failures, parse errors) exit with code 2
+and a clear stderr message; the GHA workflow surfaces this without a stack
+trace. Exits with code 1 only when discovery cannot find a candidate URL.
 """
 
 import json
 import re
 import sys
 from datetime import datetime
+from urllib.parse import urljoin
 
 import requests
 from lxml import html
+from lxml.etree import XMLSyntaxError
+
+from qstheory2pdf import QiuShiCrawler
 
 BASE = "https://www.qstheory.cn"
-UA = {"User-Agent": "Mozilla/5.0"}
+NETWORK_TIMEOUT = 30
 
 
-def _fetch_tree(url: str) -> html.HtmlElement:
-    resp = requests.get(url, headers=UA, timeout=30)
+def _fetch_tree(session: requests.Session, url: str) -> html.HtmlElement:
+    """Fetch a URL with the shared QiuShiCrawler session."""
+    resp = session.get(url, timeout=NETWORK_TIMEOUT)
     resp.encoding = "utf-8"
     return html.fromstring(resp.text)
 
 
-def _extract_issue_from_page(url: str) -> dict | None:
+def _extract_issue_from_page(session: requests.Session, url: str) -> dict | None:
     """Fetch a TOC page and extract the issue volume from metadata."""
-    tree = _fetch_tree(url)
+    tree = _fetch_tree(session, url)
     for span in tree.xpath("//span[@class='appellation']"):
         text = span.text_content().strip()
         m = re.search(r"《求是》(\d{4})/(\d+)", text)
@@ -47,10 +56,10 @@ def _result(url: str, year: str, num: int) -> dict:
     }
 
 
-def _discover_via_mulu() -> dict | None:
+def _discover_via_mulu(session: requests.Session) -> dict | None:
     """Discover latest issue via the official archive directory."""
     # Step 1: fetch the mulu (archive) page
-    tree = _fetch_tree(BASE + "/qs/mulu.htm")
+    tree = _fetch_tree(session, BASE + "/qs/mulu.htm")
 
     # Step 2: find the link for the current year (e.g., "2026年")
     current_year = str(datetime.now().year)
@@ -59,17 +68,14 @@ def _discover_via_mulu() -> dict | None:
         text = a_tag.text_content().strip()
         if text == current_year + "年":
             href = (a_tag.get("href") or "").strip()
-            if href.startswith("/"):
-                year_url = BASE + href
-            elif href.startswith("http"):
-                year_url = href
+            year_url = urljoin(BASE + "/", href)
             break
 
     if not year_url:
         return None
 
     # Step 3: fetch the year index page and parse all issue links
-    tree = _fetch_tree(year_url)
+    tree = _fetch_tree(session, year_url)
 
     best: tuple[int, str] | None = None  # (issue_number, url)
     for a_tag in tree.xpath("//a"):
@@ -90,9 +96,9 @@ def _discover_via_mulu() -> dict | None:
     return None
 
 
-def _discover_via_homepage() -> dict | None:
+def _discover_via_homepage(session: requests.Session) -> dict | None:
     """Fallback: scrape the homepage '在线读刊' section."""
-    tree = _fetch_tree(BASE + "/")
+    tree = _fetch_tree(session, BASE + "/")
     for a_tag in tree.xpath("//a"):
         text = a_tag.text_content().strip()
         m = re.match(r"(\d{4})年第(\d+)期$", text)
@@ -107,34 +113,50 @@ def _discover_via_homepage() -> dict | None:
 
 
 def main() -> None:
-    result = None
+    # Reuse the QiuShiCrawler session (and its User-Agent) so that header
+    # configuration lives in exactly one place.
+    crawler = QiuShiCrawler()
+    session = crawler.session
 
-    # --- Manual URL path ---
-    if len(sys.argv) > 1 and sys.argv[1].strip():
-        url = sys.argv[1].strip()
-        result = _extract_issue_from_page(url)
+    try:
+        result = None
+
+        # --- Manual URL path ---
+        if len(sys.argv) > 1 and sys.argv[1].strip():
+            url = sys.argv[1].strip()
+            result = _extract_issue_from_page(session, url)
+            if result is None:
+                m = re.search(r"/(\d{4})(\d{2})(\d{2})/", url)
+                if m:
+                    result = {
+                        "url": url,
+                        "volume": f"{m.group(1)}年{m.group(2)}月",
+                        "tag": f"qstheory-{m.group(1)}-{m.group(2)}",
+                    }
+
+        # --- Auto-discovery ---
         if result is None:
-            m = re.search(r"/(\d{4})(\d{2})(\d{2})/", url)
-            if m:
-                result = {
-                    "url": url,
-                    "volume": f"{m.group(1)}年{m.group(2)}月",
-                    "tag": f"qstheory-{m.group(1)}-{m.group(2)}",
-                }
+            result = _discover_via_mulu(session)
 
-    # --- Auto-discovery ---
-    if result is None:
-        result = _discover_via_mulu()
+        if result is None:
+            result = _discover_via_homepage(session)
 
-    if result is None:
-        result = _discover_via_homepage()
+        if result is None:
+            print("无法发现最新期 URL", file=sys.stderr)
+            sys.exit(1)
 
-    if result is None:
-        print("无法发现最新期 URL", file=sys.stderr)
-        sys.exit(1)
+        json.dump(result, sys.stdout, ensure_ascii=False)
+        print()
 
-    json.dump(result, sys.stdout, ensure_ascii=False)
-    print()
+    except requests.exceptions.RequestException as e:
+        print(f"无法连接 qstheory.cn: {e}", file=sys.stderr)
+        sys.exit(2)
+    except XMLSyntaxError as e:
+        print(f"无法解析 qstheory.cn 返回的 HTML: {e}", file=sys.stderr)
+        sys.exit(2)
+    except Exception as e:  # noqa: BLE001 — last-resort guard for the CI job
+        print(f"发现失败: {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":

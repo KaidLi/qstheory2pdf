@@ -7,7 +7,7 @@ name = "qstheory2pdf"
 version = "0.1.0"
 description = "将《求是》文章转化为PDF文件"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = {text = "GPL-3.0"}
 authors = [
     {name = "StableGenius", email = "feng@dongfa.pro"},

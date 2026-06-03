@@ -16,12 +16,7 @@
 \newcommand{\ekv}[1]{\kvsetkeys{ELEGANT}{#1}}
 
 \DeclareStringOption[blue]{color}
-\DeclareVoidOption{green}{\ekv{color=green}}
-\DeclareVoidOption{cyan}{\ekv{color=cyan}}
-\DeclareVoidOption{blue}{\ekv{color=blue}}
-\DeclareVoidOption{sakura}{\ekv{color=sakura}}
 \DeclareVoidOption{black}{\ekv{color=black}}
-\DeclareVoidOption{brown}{\ekv{color=brown}}
 
 \DeclareStringOption[pad]{device}
 \DeclareVoidOption{pc}{\ekv{device=pc}}
@@ -33,34 +28,22 @@
 
 \DeclareStringOption[cn]{lang}
 \DeclareVoidOption{cn}{\ekv{lang=cn}}
-\DeclareVoidOption{en}{\ekv{lang=en}}
 
 \DeclareStringOption{mode}
-\DeclareVoidOption{geye}{\ekv{mode=geye}}
-\DeclareVoidOption{hazy}{\ekv{mode=hazy}}
-\DeclareVoidOption{sepia}{\ekv{mode=sepia}}
 
 \DeclareStringOption[ctexfont]{chinesefont}
 \DeclareVoidOption{ctexfont}{\ekv{chinesefont=ctexfont}}
-\DeclareVoidOption{founder}{\ekv{chinesefont=founder}}
-\DeclareVoidOption{nofont}{\ekv{chinesefont=nofont}}
 
 \DeclareStringOption[numeric-comp]{citestyle}
 \DeclareStringOption[numeric]{bibstyle}
 
 \DeclareStringOption[biber]{bibend}
-\DeclareVoidOption{biber}{\ekv{bibend=biber}}
-\DeclareVoidOption{bibtex}{\ekv{bibend=bibtex}}
 
 
 \DeclareStringOption[11pt]{fontsize}
-\DeclareVoidOption{10pt}{\ekv{fontsize=10pt}}
 \DeclareVoidOption{11pt}{\ekv{fontsize=11pt}}
-\DeclareVoidOption{12pt}{\ekv{fontsize=12pt}}
 
 \DeclareStringOption[cm]{math}
-\DeclareVoidOption{newtx}{\ekv{math=newtx}}
-\DeclareVoidOption{mtpro2}{\ekv{math=mtpro2}}
 \DeclareVoidOption{cm}{\ekv{math=cm}}
 
 \DeclareDefaultOption{

@@ -1,9 +1,6 @@
 """CLI entry point for qstheory2pdf."""
 
 import argparse
-import os
-import re
-import shutil
 import sys
 
 # Force UTF-8 output on Windows, where the terminal defaults to GBK
@@ -11,13 +8,6 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from qstheory2pdf import QiuShiCrawler, PDFGenerator
-
-
-def _cleanup_img_dir() -> None:
-    """Remove the downloaded image cache directory."""
-    img_dir = os.path.join(os.getcwd(), "img")
-    if os.path.isdir(img_dir):
-        shutil.rmtree(img_dir)
 
 
 def main() -> None:
@@ -45,42 +35,49 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # ---- determine mode (single fetch, no images needed) ------------------
     crawler = QiuShiCrawler()
-    pdf_gen = PDFGenerator(device=args.device)
-
-    # ---- determine mode ------------------------------------------------------
     if args.single:
         mode = "single"
     else:
-        urls = crawler.fetch_urls(args.url)
-        mode = "issue" if len(urls) >= 2 else "single"
+        toc = crawler.fetch_toc(args.url)
+        mode = "issue" if len(toc["urls"]) >= 2 else "single"
 
-    # ---- single article ------------------------------------------------------
+    # ---- single article ---------------------------------------------------
     if mode == "single":
         print(f"单篇文章模式: {args.url}")
-        info = crawler.fetch_info(args.url, with_qr=True)
-        if not info.get("content"):
-            print("错误: 未能提取到文章内容")
-            sys.exit(1)
-        output = pdf_gen.gen_single(info, args.output)
+        pdf_gen = PDFGenerator(device=args.device)
+        image_dir = pdf_gen.start()
+        try:
+            crawler.image_dir = image_dir
+            info = crawler.fetch_info(args.url, with_qr=True)
+            if not info.get("content"):
+                print("错误: 未能提取到文章内容")
+                sys.exit(1)
+            output = pdf_gen.gen_single(info, args.output)
+        finally:
+            pdf_gen.finish()
         print(f"PDF已生成: {output}")
+        return
 
-    # ---- full issue ----------------------------------------------------------
-    else:
-        toc_entries = crawler.fetch_toc_entries(args.url)
-        urls = [e["url"] for e in toc_entries]
-        print(f"整期模式: 共 {len(urls)} 篇文章")
+    # ---- full issue -------------------------------------------------------
+    toc_entries = toc["entries"]
+    print(f"整期模式: 共 {len(toc_entries)} 篇文章")
+
+    pdf_gen = PDFGenerator(device=args.device)
+    image_dir = pdf_gen.start()
+    try:
+        crawler.image_dir = image_dir
         articles = []
-        matched_toc = []  # only entries that have an article
-        for i, url in enumerate(urls, 1):
-            print(f"  [{i}/{len(urls)}] 下载中...", end=" ")
+        matched_toc = []
+        for i, entry in enumerate(toc_entries, 1):
+            url = entry["url"]
+            print(f"  [{i}/{len(toc_entries)}] 下载中...", end=" ")
             info = crawler.fetch_info(url, with_qr=False)
             if info.get("content"):
                 articles.append(info)
-                matched_toc.append(toc_entries[i - 1])
-                title = info["title"].replace(r"\ ", " ")
-                title = re.sub(r"[\u200b-\u200f\u2028-\u202f\u00ad]", "", title)
-                print(title[:30])
+                matched_toc.append(entry)
+                print(info["title"][:30])
             else:
                 print("跳过 (无内容)")
 
@@ -88,14 +85,10 @@ def main() -> None:
             print("错误: 未能下载任何文章")
             sys.exit(1)
 
-        # extract issue volume from first article
-        issue_vol = articles[0].get("volume", "") if articles else ""
-        issue_date = ""
-        for a in articles:
-            d = a.get("date", "").replace(r"\ ", " ")
-            if d:
-                issue_date = d[:10]
-                break
+        # extract issue volume/date from first article (now well-defined;
+        # see qstheory2pdf.types.Article for the schema)
+        issue_vol = articles[0].get("volume", "")
+        issue_date = articles[0].get("date", "")
 
         # download TOC page cover image for title page
         cover_img = crawler.download_toc_cover(args.url)
@@ -109,10 +102,10 @@ def main() -> None:
             cover_image=cover_img,
             output_path=args.output,
         )
-        print(f"PDF已生成: {output}")
-
+    finally:
+        pdf_gen.finish()
+    print(f"PDF已生成: {output}")
     print("完成!")
-    _cleanup_img_dir()
 
 
 if __name__ == "__main__":

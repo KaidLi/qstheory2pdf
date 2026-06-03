@@ -26,6 +26,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
 
@@ -49,6 +50,12 @@ jobs:
 
       - name: Switch fontset for Linux
         run: sed -i 's/fontset=windows/fontset=fandol/' src/qstheory2pdf/resource/qiushi.cls
+
+      - name: Sync dependencies
+        run: uv sync
+
+      - name: Smoke test
+        run: uv run python -c "import qstheory2pdf; print('qstheory2pdf', qstheory2pdf.__version__)"
 
       - name: Discover latest issue
         id: discover
@@ -103,3 +110,14 @@ jobs:
           name: ${{ steps.discover.outputs.tag }}
           path: output/*.pdf
           retention-days: 30
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ steps.discover.outputs.tag }}
+          path: |
+            output/
+            **/*.log
+          retention-days: 7
+          if-no-files-found: ignore

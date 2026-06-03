@@ -1,4 +1,10 @@
-"""Generate PDF from article content via LaTeX + xelatex."""
+"""Generate PDF from article content via LaTeX + xelatex.
+
+This module is the presentation layer. It consumes Article/ContentBlock
+TypedDicts (defined in types.py) and applies all LaTeX formatting
+(escape, font wrapping, structural layout) here. The data layer
+(crawler.py) does not know about LaTeX.
+"""
 
 import os
 import re
@@ -7,12 +13,54 @@ import subprocess
 import tempfile
 
 import qstheory2pdf
+from qstheory2pdf.types import Article, ContentBlock, ImageBlock, TextBlock, TocEntry
+
+# LaTeX special characters that must be backslash-escaped inside a { ... }
+# group. Backslashes are not processed here — they're added intentionally by
+# format_text_to_latex to keep multi-word arguments intact.
+_LATEX_SPECIALS = ["&", "%", "#", "_", "$", "~", "^"]
 
 
 def _escape_latex(text: str) -> str:
-    """Escape special LaTeX characters in text."""
-    for ch in ["&", "%", "#", "_", "$", "~", "^"]:
+    """Escape LaTeX special characters. For fixed strings (titles, names)."""
+    for ch in _LATEX_SPECIALS:
         text = text.replace(ch, "\\" + ch)
+    return text
+
+
+def format_text_to_latex(
+    text: str,
+    *,
+    bold: bool = False,
+    italic: bool = False,
+    font_family: str = "",
+) -> str:
+    """Convert plain text + formatting flags to a LaTeX fragment.
+
+    Steps:
+      1. Escape LaTeX special characters (so user text doesn't break .tex).
+      2. Add ``\\`` before spaces (so multi-word text stays together inside
+         ``{ ... }`` groups like ``{\\heiti ...}``).
+      3. Wrap in CJK font command per ``font_family`` flag.
+
+    Note: ``bold`` / ``italic`` flags are *not* applied here at the text
+    level. They drive *structural* formatting in ``_render_text_block``
+    (e.g. paragraph-level bold becomes ``\\indent {\\heiti ...}`` plus
+    optional centering), which is a block-level concern, not text-level.
+    """
+    for ch in _LATEX_SPECIALS:
+        text = text.replace(ch, "\\" + ch)
+    text = text.replace(" ", r"\ ")
+
+    if font_family == "fang":
+        text = r"{\fangsong " + text + r"}"
+    elif font_family == "kai":
+        text = r"{\kaishu " + text + r"}"
+    elif font_family == "hei":
+        text = r"{\heiti " + text + r"}"
+    elif font_family == "song":
+        text = r"{\songti " + text + r"}"
+
     return text
 
 
@@ -27,7 +75,16 @@ _FIGURE_TEMPLATE = r"""
 
 
 class PDFGenerator:
-    """Generate single-article or full-issue PDFs via LaTeX."""
+    """Generate single-article or full-issue PDFs via LaTeX.
+
+    Lifecycle:
+        gen = PDFGenerator(device="scribe")
+        image_dir = gen.start()        # creates tempdir, returns image_dir
+        crawler = QiuShiCrawler(image_dir=image_dir)
+        info = crawler.fetch_info(...)
+        output = gen.gen_single(info, args.output)
+        gen.finish()                   # removes tempdir (and all images)
+    """
 
     def __init__(self, device: str = "normal") -> None:
         resource_path = os.path.join(
@@ -36,26 +93,38 @@ class PDFGenerator:
         self.template_path = os.path.join(resource_path, "template.tex")
         self.cls_path = os.path.join(resource_path, "qiushi.cls")
         self.device = device
-        self.tmpdir = None
+        self.workdir: str | None = None
+        self.image_dir: str | None = None
 
-    # ------------------------------------------------------------------ helpers
+    # ------------------------------------------------------------------ lifecycle
 
-    def _setup_workdir(self) -> str:
-        """Create a temp working dir, copy cls into it, return its path."""
-        self.tmpdir = tempfile.mkdtemp(prefix="qiushi_")
-        shutil.copy(self.cls_path, os.path.join(self.tmpdir, "qiushi.cls"))
-        # also copy img dir if it exists
-        img_src = os.path.join(os.getcwd(), "img")
-        if os.path.isdir(img_src):
-            img_dst = os.path.join(self.tmpdir, "img")
-            if os.path.exists(img_dst):
-                shutil.rmtree(img_dst)
-            shutil.copytree(img_src, img_dst)
-        return self.tmpdir
+    def start(self) -> str:
+        """Create a temp working directory with cls and image subdir.
+
+        Returns the image directory path (workdir/img). The caller passes
+        this to QiuShiCrawler so it can write article figures there. The
+        directory is removed by ``finish()``.
+        """
+        self.workdir = tempfile.mkdtemp(prefix="qiushi_")
+        self.image_dir = os.path.join(self.workdir, "img")
+        os.makedirs(self.image_dir, exist_ok=True)
+        shutil.copy(self.cls_path, os.path.join(self.workdir, "qiushi.cls"))
+        return self.image_dir
+
+    def finish(self) -> None:
+        """Remove the temp working directory created by ``start()``."""
+        if self.workdir and os.path.isdir(self.workdir):
+            shutil.rmtree(self.workdir)
+        self.workdir = None
+        self.image_dir = None
+
+    # ------------------------------------------------------------------ compile
 
     def _compile(self, basename: str, verbose: bool = True) -> None:
         """Run xelatex twice (for TOC/cross-refs)."""
-        cwd = self.tmpdir or os.getcwd()
+        if self.workdir is None:
+            raise RuntimeError("PDFGenerator.start() must be called before _compile()")
+        cwd = self.workdir
         tex_file = basename + ".tex"
 
         # find xelatex — on Windows it may be outside bash PATH
@@ -69,14 +138,20 @@ class PDFGenerator:
         for i in range(2):
             if verbose:
                 print(f"  编译 PDF (第{i+1}遍)...", end=" ", flush=True)
-            result = subprocess.run(
-                [xelatex, "-interaction=nonstopmode", tex_file],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=cwd,
-                env=env,
-                check=False,
-            )
+            try:
+                result = subprocess.run(
+                    [xelatex, "-interaction=nonstopmode", tex_file],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=cwd,
+                    env=env,
+                    check=False,
+                    timeout=300,
+                )
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(
+                    f"xelatex timed out after 300s (run {i + 1}/2)"
+                ) from None
             pdf_path = os.path.join(cwd, basename + ".pdf")
             if result.returncode != 0 and not os.path.exists(pdf_path):
                 # Real error — PDF wasn't produced; print log for diagnostics
@@ -122,25 +197,18 @@ class PDFGenerator:
             "xelatex not found. Install TeX Live: https://tug.org/texlive/"
         )
 
-    def _cleanup(self) -> None:
-        """Remove the temporary working directory."""
-        if self.tmpdir and os.path.isdir(self.tmpdir):
-            shutil.rmtree(self.tmpdir)
-
     # -------------------------------------------------------------- single mode
 
-    def gen_single(self, info: dict, output_path: str | None = None) -> str:
+    def gen_single(self, info: Article, output_path: str | None = None) -> str:
         """Generate a PDF for a single article.
 
-        Args:
-            info: dict from QiuShiCrawler.fetch_info().
-            output_path: Optional output PDF path. Defaults to
-                         <title>.pdf in the current directory.
+        Assumes ``start()`` was called and the article's images have been
+        written to ``self.image_dir``.
 
-        Returns:
-            Path to the generated PDF.
+        Returns the path to the generated PDF.
         """
-        work = self._setup_workdir()
+        if self.workdir is None or self.image_dir is None:
+            raise RuntimeError("PDFGenerator.start() must be called before gen_single()")
 
         # read & fill template
         with open(self.template_path, "r", encoding="utf-8") as f:
@@ -148,83 +216,79 @@ class PDFGenerator:
         tex = tex.replace("[normal, black]", f"[{self.device}, black]")
 
         for key in ["title", "author", "volume"]:
-            tex = tex.replace(f"==xx({key})xx==", info.get(key, ""))
-        tex = tex.replace("==xx(qrcode)xx==", info.get("qrcode", "").replace("\\", "/"))
+            tex = tex.replace(f"==xx({key})xx==", _escape_latex(info.get(key, "")))
+        # QR code and images are stored under image_dir; xelatex runs in
+        # workdir so the path is "img/<filename>".
+        qr_rel = info.get("qrcode", "")
+        qr_path = f"img/{qr_rel}" if qr_rel else ""
+        tex = tex.replace("==xx(qrcode)xx==", qr_path)
 
         # build body
-        body = self._build_body(info["content"])
+        body = self._build_body(info.get("content", []))
         tex = tex.replace("==xx(content)xx==", body)
 
         # write, compile, collect result
         basename = "output"
-        tex_path = os.path.join(work, basename + ".tex")
+        tex_path = os.path.join(self.workdir, basename + ".tex")
         with open(tex_path, "w", encoding="utf-8") as f:
             f.write(tex)
 
         self._compile(basename)
 
-        pdf_src = os.path.join(work, basename + ".pdf")
+        pdf_src = os.path.join(self.workdir, basename + ".pdf")
         if output_path is None:
             output_dir = os.path.join(os.getcwd(), "output")
             os.makedirs(output_dir, exist_ok=True)
-            output_path = os.path.join(output_dir, _safe_name(info["title"]) + ".pdf")
+            output_path = os.path.join(output_dir, _safe_name(info.get("title", "output")) + ".pdf")
         shutil.copy(pdf_src, output_path)
-        self._cleanup()
         return output_path
 
     # --------------------------------------------------------------- issue mode
 
     def gen_issue(
         self,
-        articles: list[dict],
+        articles: list[Article],
         issue_volume: str,
         issue_date: str = "",
-        toc_entries: list[dict] | None = None,
+        toc_entries: list[TocEntry] | None = None,
         cover_image: str | None = None,
         output_path: str | None = None,
     ) -> str:
         """Generate a combined PDF for a full magazine issue.
 
-        Args:
-            articles: List of dicts from QiuShiCrawler.fetch_info().
-            issue_volume: e.g. "《求是》2026/08".
-            issue_date: e.g. "2026-04-16".
-            toc_entries: Optional list from fetch_toc_entries() for a
-                         rich manual TOC. Falls back to auto-generated.
-            cover_image: Optional path to a cover image for title page.
-            output_path: Optional output PDF path.
-
-        Returns:
-            Path to the generated PDF.
+        Assumes ``start()`` was called and all articles' images have been
+        written to ``self.image_dir``. ``cover_image`` is a path relative
+        to ``self.image_dir``.
         """
-        work = self._setup_workdir()
+        if self.workdir is None:
+            raise RuntimeError("PDFGenerator.start() must be called before gen_issue()")
+
         tex = self._build_issue_tex(
             articles, issue_volume, issue_date, toc_entries, cover_image
         )
 
         basename = "output"
-        tex_path = os.path.join(work, basename + ".tex")
+        tex_path = os.path.join(self.workdir, basename + ".tex")
         with open(tex_path, "w", encoding="utf-8") as f:
             f.write(tex)
 
         self._compile(basename)
 
-        pdf_src = os.path.join(work, basename + ".pdf")
+        pdf_src = os.path.join(self.workdir, basename + ".pdf")
         if output_path is None:
             output_dir = os.path.join(os.getcwd(), "output")
             os.makedirs(output_dir, exist_ok=True)
             safe_vol = _safe_name(issue_volume)
             output_path = os.path.join(output_dir, f"{safe_vol}.pdf")
         shutil.copy(pdf_src, output_path)
-        self._cleanup()
         return output_path
 
     def _build_issue_tex(
         self,
-        articles: list[dict],
+        articles: list[Article],
         issue_volume: str,
         issue_date: str,
-        toc_entries: list[dict] | None = None,
+        toc_entries: list[TocEntry] | None = None,
         cover_image: str | None = None,
     ) -> str:
         """Build the complete LaTeX source for an issue document."""
@@ -251,7 +315,7 @@ class PDFGenerator:
             lines.append(r"\begin{titlepage}")
             lines.append(r"\centering")
             lines.append(r"\noindent")
-            lines.append(r"\includegraphics[width=\paperwidth,height=\paperheight,keepaspectratio]{" + _escape_latex(cover_image) + r"}")
+            lines.append(r"\includegraphics[width=\paperwidth,height=\paperheight,keepaspectratio]{img/" + _escape_latex(cover_image) + r"}")
             lines.append(r"\end{titlepage}")
             lines.append(r"\restoregeometry")
         else:
@@ -318,7 +382,7 @@ class PDFGenerator:
         return "\n".join(lines)
 
     @staticmethod
-    def _build_manual_toc(entries: list[dict]) -> list[str]:
+    def _build_manual_toc(entries: list[TocEntry]) -> list[str]:
         """Build a manual TOC matching the original magazine design.
 
         Original design:
@@ -384,9 +448,9 @@ class PDFGenerator:
     # ---------------------------------------------------------------- body gen
 
     @staticmethod
-    def _size_cmd(px: int | None) -> str:
+    def _size_cmd(px: int) -> str:
         """Map font-size in px to a LaTeX size command."""
-        if px is None:
+        if px <= 0:
             return ""
         if px >= 26:
             return r"\Huge "
@@ -396,80 +460,63 @@ class PDFGenerator:
             return r"\large "
         return ""
 
-    @staticmethod
-    def _font_cmd(family: str) -> str:
-        """Map font-family string to a LaTeX CJK font command."""
-        if family == "kai":
-            return r"\kaishu "
-        if family == "hei":
-            return r"\heiti "
-        if family == "fang":
-            return r"\fangsong "
-        return ""
-
-    def _build_body(self, content: list[dict]) -> str:
+    def _build_body(self, content: list[ContentBlock]) -> str:
         """Convert a list of content blocks into LaTeX body text.
 
         Chinese typography conventions:
-        - Paragraph-level bold → \\heiti (\\textbf does not affect CJK)
-        - Emphasis → \\kaishu (Chinese convention for italic-equivalent)
-        - Large centered bold → magazine section heading with \\heiti
+        - Paragraph-level bold → ``\\heiti`` (``\\textbf`` does not affect CJK)
+        - Italic → ``\\kaishu`` (Chinese convention for italic-equivalent)
+        - Large centered bold → magazine section heading with ``\\heiti``
         """
         parts = []
         for block in content:
             if "img" in block:
-                fig = _FIGURE_TEMPLATE % (
-                    _escape_latex(block["img"]),
-                    _escape_latex(block.get("caption", "")),
-                )
+                # Image block: caption gets full LaTeX escaping, image path is
+                # relative to workdir ("img/<filename>").
+                img_block = block  # type: ImageBlock
+                caption = format_text_to_latex(img_block.get("caption", ""))
+                fig = _FIGURE_TEMPLATE % (f"img/{img_block['img']}", caption)
                 parts.append(fig)
             elif "text" in block:
-                text = _escape_latex(block["text"])
-                bold = block.get("bold", False)
-                center = block.get("center", False)
-                large = block.get("large", False)
-                right = block.get("right", False)
-                font_family = block.get("font_family", "")
-                font_size = block.get("font_size", None)
-                em = block.get("em", False)
-
-                # --- magazine-style centered heading ---
-                if large and bold and center:
-                    text = r"{\heiti\Large " + text + r"}"
-                    parts.append(r"\begin{center}" + text + r"\end{center}")
-                    continue
-
-                # --- font family (CJK) ---
-                fm_cmd = self._font_cmd(font_family)
-                if fm_cmd:
-                    text = r"{" + fm_cmd + text + r"}"
-
-                # --- font size ---
-                sz_cmd = self._size_cmd(font_size or (18 if large else None))
-                if sz_cmd:
-                    text = r"{" + sz_cmd + text + r"}"
-
-                # --- structural formatting ---
-                if right:
-                    text = r"\begin{flushright}" + text + r"\end{flushright}"
-                elif center and bold:
-                    # centered bold heading → heiti
-                    text = r"{\heiti " + text + r"}"
-                    text = r"\begin{center}" + text + r"\end{center}"
-                elif center:
-                    text = r"\begin{center}" + text + r"\end{center}"
-                elif bold:
-                    # paragraph-level bold → heiti (CJK convention)
-                    text = r"\indent {\heiti " + text + r"}"
-                elif em:
-                    # emphasis → kaishu (Chinese italic convention)
-                    text = r"\indent {\kaishu " + text + r"}"
-                else:
-                    text = r"\indent " + text
-
-                parts.append(text)
-
+                parts.append(self._render_text_block(block))  # type: ignore[arg-type]
         return "\n\n".join(parts)
+
+    @staticmethod
+    def _render_text_block(block: TextBlock) -> str:
+        """Render a single text content block to a LaTeX paragraph."""
+        text = format_text_to_latex(
+            block["text"],
+            font_family=block.get("font_family", ""),
+        )
+
+        bold = block.get("bold", False)
+        italic = block.get("italic", False)
+        center = block.get("center", False)
+        large = block.get("large", False)
+        right = block.get("right", False)
+        font_size = block.get("font_size", 0)
+
+        # magazine-style centered heading
+        if large and bold and center:
+            return r"\begin{center}{\heiti\Large " + text + r"}\end{center}"
+
+        # font size
+        sz_cmd = PDFGenerator._size_cmd(font_size or (18 if large else 0))
+        if sz_cmd:
+            text = r"{" + sz_cmd + text + r"}"
+
+        # structural
+        if right:
+            return r"\begin{flushright}" + text + r"\end{flushright}"
+        if center and bold:
+            return r"\begin{center}{\heiti " + text + r"}\end{center}"
+        if center:
+            return r"\begin{center}" + text + r"\end{center}"
+        if bold:
+            return r"\indent {\heiti " + text + r"}"
+        if italic:
+            return r"\indent {\kaishu " + text + r"}"
+        return r"\indent " + text
 
 
 def _safe_name(name: str) -> str:
