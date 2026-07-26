@@ -322,13 +322,19 @@ class PDFGenerator:
 
         # ---- title page ----
         if cover_image:
-            lines.append(r"\newgeometry{margin=0mm}")
+            # Pin the cover as a zero-size tikz overlay at the page center:
+            # an in-flow \includegraphics at full page height overflows the
+            # text area (topskip/lineskip) and gets pushed to the next page,
+            # leaving a blank first page.
             lines.append(r"\begin{titlepage}")
-            lines.append(r"\centering")
-            lines.append(r"\noindent")
-            lines.append(r"\includegraphics[width=\paperwidth,height=\paperheight,keepaspectratio]{img/" + _escape_latex(cover_image) + r"}")
+            lines.append(
+                r"\tikz[remember picture,overlay]"
+                r"\node at (current page.center)"
+                r" {\includegraphics[width=\paperwidth,height=\paperheight,keepaspectratio]{img/"
+                + _escape_latex(cover_image)
+                + r"}};"
+            )
             lines.append(r"\end{titlepage}")
-            lines.append(r"\restoregeometry")
         else:
             lines.append(r"\begin{titlepage}")
             lines.append(r"\centering")
@@ -367,7 +373,6 @@ class PDFGenerator:
             title = art.get("title", "")
             subtitle = art.get("subtitle", "")
             author = art.get("author", "")
-            volume = art.get("volume", "")
             content = art.get("content", [])
             column = column_by_title.get(title, "")
 
@@ -375,7 +380,7 @@ class PDFGenerator:
             lines.append(r"\pagestyle{fancy-note}")
 
             # centered title block (graded sizes: column < title > subtitle
-            # > author > volume, closed off by a short rule before the body)
+            # > author, closed off by a short rule before the body)
             lines.append(r"\begin{center}")
             lines.append(r"\vspace*{1em}")
             safe_title = _escape_latex(title)
@@ -390,9 +395,6 @@ class PDFGenerator:
             if author:
                 lines.append(r"\vspace{0.8em}")
                 lines.append(r"{\kaishu " + _escape_latex(author) + r"\par}")
-            if volume:
-                lines.append(r"\vspace{0.2em}")
-                lines.append(r"{\small " + _escape_latex(volume) + r"\par}")
             lines.append(r"\vspace{0.5em}")
             lines.append(r"\rule{0.3\textwidth}{0.6pt}")
             lines.append(r"\end{center}")
