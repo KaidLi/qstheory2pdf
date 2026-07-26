@@ -15,16 +15,25 @@ import tempfile
 import qstheory2pdf
 from qstheory2pdf.types import Article, ContentBlock, ImageBlock, TextBlock, TocEntry
 
-# LaTeX special characters that must be backslash-escaped inside a { ... }
-# group. Backslashes are not processed here — they're added intentionally by
-# format_text_to_latex to keep multi-word arguments intact.
-_LATEX_SPECIALS = ["&", "%", "#", "_", "$", "~", "^"]
+# LaTeX special characters escaped by prefixing a backslash.
+_LATEX_SPECIALS = ["&", "%", "#", "_", "$"]
 
 
 def _escape_latex(text: str) -> str:
-    """Escape LaTeX special characters. For fixed strings (titles, names)."""
+    """Escape all LaTeX special characters in untrusted text.
+
+    Handles backslash and braces (which would otherwise let page content
+    inject LaTeX commands or break compilation), and uses the text-symbol
+    commands for ``~``/``^`` — a bare ``\\~``/``\\^`` is an accent command
+    that would decorate the following character instead of printing.
+    """
+    text = text.replace("\\", "\x00")  # placeholder; restored last
     for ch in _LATEX_SPECIALS:
         text = text.replace(ch, "\\" + ch)
+    text = text.replace("{", r"\{").replace("}", r"\}")
+    text = text.replace("~", r"\textasciitilde{}")
+    text = text.replace("^", r"\textasciicircum{}")
+    text = text.replace("\x00", r"\textbackslash{}")
     return text
 
 
@@ -48,8 +57,7 @@ def format_text_to_latex(
     (e.g. paragraph-level bold becomes ``\\indent {\\heiti ...}`` plus
     optional centering), which is a block-level concern, not text-level.
     """
-    for ch in _LATEX_SPECIALS:
-        text = text.replace(ch, "\\" + ch)
+    text = _escape_latex(text)
     text = text.replace(" ", r"\ ")
 
     if font_family == "fang":
@@ -64,13 +72,20 @@ def format_text_to_latex(
     return text
 
 
+# Non-floating figures: keep images at their position in the reading flow
+# (magazine layout), cap height so tall images never overflow small pages.
 _FIGURE_TEMPLATE = r"""
-\begin{figure}[htbp]
-    \centering
-    \includegraphics[width=0.75\linewidth]{%s}
-    \vspace{0.3em}\par
-    {\kaishu\centering %s}
-\end{figure}
+\begin{center}
+    \includegraphics[width=0.85\linewidth, height=0.72\textheight, keepaspectratio]{%s}
+    \\[0.5em]
+    {\kaishu\footnotesize %s}
+\end{center}
+""".strip()
+
+_FIGURE_TEMPLATE_NOCAPTION = r"""
+\begin{center}
+    \includegraphics[width=0.85\linewidth, height=0.72\textheight, keepaspectratio]{%s}
+\end{center}
 """.strip()
 
 
@@ -296,14 +311,10 @@ class PDFGenerator:
 
         # preamble
         lines.append(rf"\documentclass[{self.device}, black]{{qiushi}}")
-        lines.append(r"\usepackage{indentfirst}")
-        lines.append(r"\usepackage{hyperref}")
+        # indentfirst/hyperref/caption and paragraph metrics are set by the
+        # class; do not override them here or device-specific tuning is lost.
         lines.append(r"\hypersetup{colorlinks=true,linkcolor=black,urlcolor=black,bookmarks=true,bookmarksopen=true}")
-        lines.append(r"\usepackage{caption}")
         lines.append(r"\graphicspath{{./img/}}")
-        lines.append(r"\setlength{\parskip}{3mm}")
-        lines.append(r"\setlength{\parindent}{2em}")
-        lines.append(r"\linespread{1.3}")
         lines.append("")
 
         lines.append(r"\begin{document}")
@@ -325,10 +336,10 @@ class PDFGenerator:
             lines.append(r"{\Huge\bfseries 《求是》杂志\par}")
             lines.append(r"\vspace{0.8cm}")
             vol_display = _escape_latex(issue_volume.replace("《求是》", ""))
-            lines.append(r"{\LARGE " + vol_display + r"\par}")
+            lines.append(r"{\LARGE\kaishu " + vol_display + r"\par}")
             if issue_date:
                 lines.append(r"\vspace{1.5cm}")
-                lines.append(r"{\large " + _escape_latex(issue_date) + r"\par}")
+                lines.append(r"{\large\kaishu " + _escape_latex(issue_date) + r"\par}")
             lines.append(r"\vfill")
             lines.append(r"{\footnotesize 仅供内部人员学习参考\par}")
             lines.append(r"\end{titlepage}")
@@ -345,29 +356,47 @@ class PDFGenerator:
         lines.append("")
 
         # ---- articles ----
+        # 栏目 lookup: TOC entries carry the column name; match by title.
+        # Entries may be a subset of the articles — skip silently on miss.
+        column_by_title = {
+            e["title"]: e["column"]
+            for e in (toc_entries or [])
+            if e.get("column") and e.get("title")
+        }
         for idx, art in enumerate(articles):
             title = art.get("title", "")
             subtitle = art.get("subtitle", "")
             author = art.get("author", "")
             volume = art.get("volume", "")
             content = art.get("content", [])
+            column = column_by_title.get(title, "")
 
             lines.append(r"\clearpage")
             lines.append(r"\pagestyle{fancy-note}")
 
-            # centered title block
+            # centered title block (graded sizes: column < title > subtitle
+            # > author > volume, closed off by a short rule before the body)
             lines.append(r"\begin{center}")
+            lines.append(r"\vspace*{1em}")
             safe_title = _escape_latex(title)
+            if column:
+                lines.append(r"{\small\kaishu 【" + _escape_latex(column) + r"】\par}")
+                lines.append(r"\vspace{0.3em}")
             lines.append(r"{\LARGE\bfseries " + safe_title + r"\par}")
             if subtitle:
                 safe_sub = _escape_latex(subtitle)
-                lines.append(r"{\kaishu " + safe_sub + r"\par}")
+                lines.append(r"\vspace{0.4em}")
+                lines.append(r"{\large\kaishu " + safe_sub + r"\par}")
             if author:
-                lines.append(r"\vspace{0.5em}")
+                lines.append(r"\vspace{0.8em}")
                 lines.append(r"{\kaishu " + _escape_latex(author) + r"\par}")
             if volume:
+                lines.append(r"\vspace{0.2em}")
                 lines.append(r"{\small " + _escape_latex(volume) + r"\par}")
+            lines.append(r"\vspace{0.5em}")
+            lines.append(r"\rule{0.3\textwidth}{0.6pt}")
             lines.append(r"\end{center}")
+            lines.append(r"\vspace{0.5em}")
             lines.append(r"\phantomsection")
             lines.append(rf"\label{{art:{idx}}}")
             lines.append(rf"\pdfbookmark[0]{{{safe_title}}}{{art:{idx}}}")
@@ -396,7 +425,7 @@ class PDFGenerator:
         result.append(r"\begin{center}")
         result.append(r"{\LARGE\bfseries 目\quad 录}")
         result.append(r"\end{center}")
-        result.append(r"\vspace{1em}")
+        result.append(r"\vspace{1.5em}")
         result.append("")
 
         for idx, entry in enumerate(entries):
@@ -440,7 +469,7 @@ class PDFGenerator:
                 lines.append(line)
 
             result.extend(lines)
-            result.append(r"\\[0.8em]")
+            result.append(r"\par\vspace{0.6em}")
             result.append("")
 
         return result
@@ -475,7 +504,10 @@ class PDFGenerator:
                 # relative to workdir ("img/<filename>").
                 img_block = block  # type: ImageBlock
                 caption = format_text_to_latex(img_block.get("caption", ""))
-                fig = _FIGURE_TEMPLATE % (f"img/{img_block['img']}", caption)
+                if caption.strip():
+                    fig = _FIGURE_TEMPLATE % (f"img/{img_block['img']}", caption)
+                else:
+                    fig = _FIGURE_TEMPLATE_NOCAPTION % f"img/{img_block['img']}"
                 parts.append(fig)
             elif "text" in block:
                 parts.append(self._render_text_block(block))  # type: ignore[arg-type]

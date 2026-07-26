@@ -109,7 +109,8 @@
     \providecommand{\fangsong}{\CJKfamily{zhfs}}}{\relax}
   
   \AfterEndPreamble{
-    \setlength\parindent{2\ccwd}}
+    \setlength\parindent{2\ccwd}%
+    \setlength\emergencystretch{3\ccwd}}
 }{\relax}
 
 \ifcsname kaishu\endcsname
@@ -229,9 +230,16 @@
 \RequirePackage{hologo}
 
 % 行距设置
+% Chinese convention: paragraph structure is carried by the 2em/2\ccwd
+% first-line indent; keep only a small flexible parskip. Widow/orphan
+% penalties matter on small e-reader pages; \raggedbottom avoids parskip
+% being stretched into ugly vertical gaps when images force page breaks.
 \linespread{1.3}
-\setlength{\parskip}{3mm}
+\setlength{\parskip}{0.4em plus 0.2em minus 0.1em}
 \setlength{\parindent}{2em}
+\widowpenalty=10000
+\clubpenalty=10000
+\raggedbottom
 % 定义护眼模式 geye=true
 \RequirePackage{xcolor}
 \RequirePackage{silence}
@@ -282,7 +290,8 @@
 \captionsetup{
   labelfont={bf,color=ecolor}}
 \captionsetup[table]{skip=3pt}
-\captionsetup[figure]{skip=3pt, font={footnotesize, it, color=blue}}
+% black captions: colored text dithers to muddy gray on e-ink displays
+\captionsetup[figure]{skip=3pt, font={footnotesize, color=black}}
 
 % list/itemize/enumerate setting
 \RequirePackage[shortlabels,inline]{enumitem}
@@ -325,6 +334,11 @@
 %% default=pad
 
 \RequirePackage{geometry}
+% scribe: default to 12pt for comfortable e-ink reading unless the user
+% passed an explicit fontsize (note: an explicit fontsize=11pt cannot be
+% distinguished from the default; pass 10pt if you want smaller).
+\ifdefstring{\ELEGANT@device}{scribe}{%
+  \ifdefstring{\ELEGANT@fontsize}{11pt}{\def\ELEGANT@fontsize{12pt}}{\relax}}{\relax}
 \WarningsOff
 \RequirePackage[\ELEGANT@fontsize]{extsizes}
 \WarningsOn
@@ -370,10 +384,14 @@
 
 \ifdefstring{\ELEGANT@device}{scribe}{%
   \geometry{
-    margin=5mm,
+    margin=8mm,
+    headheight=15pt,
     paperwidth=5.83in,
     paperheight=7.76in,
-    includefoot}}{%
+    includefoot}
+  % generous leading is the biggest readability lever on e-ink; CJK glyphs
+  % fill the em-box, so 1.3 reads tight at this measure
+  \linespread{1.4}}{%
   \relax}
 
 % headings
@@ -395,7 +413,7 @@
 
 \fancypagestyle{plain}{%
   \fancyhf{}
-  \fancyfoot[R]{\footnotesize\textcolor{gray}{\thepage}}}
+  \fancyfoot[C]{\footnotesize\thepage}}
 
 \pagestyle{fancy-note}
 
@@ -487,10 +505,14 @@
 \newcommand*{\eitemiii}{%
   \tikz\draw[baseline,fill=ecolor,draw=none] circle (2pt);}
 
-% add qrcode at page's right top
+% add qrcode at the page's bottom-right corner (the title page uses
+% \thispagestyle{empty}, so this corner is guaranteed free; the old
+% top-right position collided with the \maketitle title on small pages)
 \newcommand{\qrcode}[1]{%
+  \ifblank{#1}{}{%
     \tikz[remember picture,overlay]
-        \path (current page.north east) ++ (-2,-2) node {\includegraphics{#1}};
+      \path (current page.south east) ++ (-1.6,1.6)
+        node {\includegraphics[width=1.5cm]{#1}};}%
 }
 
 
