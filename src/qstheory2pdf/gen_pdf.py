@@ -454,7 +454,6 @@ class PDFGenerator:
         result.append(r"\qstocheader")
         result.append("")
 
-        last_column = None
         for idx, entry in enumerate(entries):
             title = _escape_latex(entry.get("title", ""))
             author = _escape_latex(entry.get("author", ""))
@@ -462,13 +461,14 @@ class PDFGenerator:
             subtitle = _escape_latex(entry.get("subtitle", ""))
             author_role = _escape_latex(entry.get("author_role", ""))
 
-            # group consecutive entries under a red column header instead of
-            # repeating the column on every line
-            if column and column != last_column:
-                result.append(r"\qstoccolumn{" + column + r"}")
-                result.append("")
+            # Inline column tag on the entry's own row (red bar + kai name),
+            # exactly mirroring the site's 栏目│标题 inline convention — a
+            # column never visually claims neighboring uncolumned entries.
+            col_tag = ""
             if column:
-                last_column = column
+                col_tag = (r"{\color{ecolor}\rule[-0.18em]{0.18em}{0.95em}}"
+                           r"\hspace{0.35em}{\small\kaishu\color{ecolor}"
+                           + column + r"}\hspace{0.5em}")
 
             lines = []
 
@@ -487,7 +487,7 @@ class PDFGenerator:
             if subtitle:
                 # two-line entry: title row → subtitle /author row
                 lines.append(
-                    r"{" + hang
+                    r"{" + hang + col_tag
                     + r"{\bfseries " + title + r"}"
                     + r"\qstocdots" + pagebox + r"}"
                 )
@@ -501,7 +501,7 @@ class PDFGenerator:
                 lines.append(sub_line + r"\par")
             else:
                 # single-line entry
-                line = r"{" + hang + r"{\bfseries " + title + r"}"
+                line = r"{" + hang + col_tag + r"{\bfseries " + title + r"}"
                 if author:
                     line += r"{\small\kaishu\color{qsgray}~/~"
                     if author_role:
@@ -555,6 +555,7 @@ class PDFGenerator:
         center = block.get("center", False)
         large = block.get("large", False)
         right = block.get("right", False)
+        left = block.get("left", False)
         font_size = block.get("font_size", 0)
 
         # magazine-style centered heading (spacing + theme color from cls)
@@ -573,6 +574,11 @@ class PDFGenerator:
             return r"\begin{center}{\heiti " + text + r"}\end{center}"
         if center:
             return r"\begin{center}" + text + r"\end{center}"
+        if left:
+            # flush-left paragraph without first-line indent (letter salutation)
+            if bold:
+                return r"\noindent {\heiti " + text + r"}"
+            return r"\noindent " + text
         if bold:
             return r"\indent {\heiti " + text + r"}"
         if italic:

@@ -21,6 +21,13 @@ _DATE_URL_RE = re.compile(r"/(\d{4})(\d{2})(\d{2})/")
 # connection hangs the CLI forever.
 _TIMEOUT = (10, 30)
 
+# TOC section headings (栏目) are short standalone lines like 文化中国 /
+# 深度调研 / 党员来信 / 统计图表 — no link, no punctuation, 2–8 chars.
+_COLUMN_TEXT_RE = re.compile(r"^[一-鿿]{2,8}$")
+# words that appear in short non-column lines (page furniture)
+_COLUMN_BLACKLIST = ("编辑", "校对", "审核", "来源", "作者", "封面", "目录",
+                     "上一篇", "下一篇", "分享", "打印", "返回", "相关", "推荐", "更多")
+
 
 class QiuShiCrawler:
     """Crawl article metadata and content from qstheory.cn.
@@ -73,6 +80,9 @@ class QiuShiCrawler:
         does NOT set the bold flag.
         """
         style = p_el.get("style", "").lower()
+        # normalize whitespace so "text-align: right" and "text-align:right"
+        # both match
+        style_norm = re.sub(r"\s+", "", style)
         full_text = p_el.xpath("string(.)").strip()
         strong_text = "".join(p_el.xpath(".//strong//text()")).strip()
         is_entirely_bold = bool(strong_text) and strong_text == full_text
@@ -101,7 +111,13 @@ class QiuShiCrawler:
             font_size = int(m.group(1))
 
         return {
-            "center": "text-align: center" in style,
+            "center": "text-align:center" in style_norm,
+            # right/left alignment declared inline on the <p> (same mechanism
+            # the site uses for centering); left also covers text-indent:0
+            # (letter salutations like 编辑同志： are flush-left, no indent)
+            "right": "text-align:right" in style_norm,
+            "left": ("text-align:left" in style_norm
+                     or re.search(r"text-indent:0(?:em|px|pt)?(?:;|$)", style_norm) is not None),
             "bold": is_entirely_bold,
             "italic": bool(p_el.xpath(".//em")),
             "large": bool(re.search(r"font-size:\s*(1[89]|2[0-9]|3[0-9])px", style)),
@@ -137,8 +153,26 @@ class QiuShiCrawler:
             return self._download_img(img_url)
         return None
 
+    @classmethod
+    def _looks_like_column_heading(cls, text: str) -> bool:
+        """True if a link-less TOC line looks like a 栏目 heading.
+
+        2026 TOC design: 栏目 names are short standalone lines (文化中国 /
+        深度调研 / 学习问答 / 党员来信 / 党刊精选 / 统计图表 …) between the
+        entry rows, not inline "栏目│标题" prefixes as in the old design.
+        """
+        norm = re.sub(r"\s+", "", text)
+        if not _COLUMN_TEXT_RE.match(norm):
+            return False
+        return not any(w in norm for w in _COLUMN_BLACKLIST)
+
     def fetch_toc(self, url: str) -> TocResult:
         """Fetch a magazine issue TOC page in a single HTTP request.
+
+        Walks block-level elements of the content area in document order:
+        blocks containing article links become entries; short link-less
+        lines in between are 栏目 headings and are attached to the entries
+        that follow them (matching the printed magazine's section layout).
 
         Returns:
             {"urls": [list of article URLs in order],
@@ -148,31 +182,51 @@ class QiuShiCrawler:
         resp.encoding = "utf-8"
         html = etree.HTML(resp.text)
 
-        # Collect article URLs from <a> tags inside content paragraphs.
-        hrefs = html.xpath(
-            '//div[contains(@class,"content")]//p//a/@href'
+        # Block-level walk in document order. Entries are usually <p>, but
+        # some sections (发现于 2026/14: 党员来信 等尾部栏目) sit in other
+        # wrappers — include li/h2/h3/h4 and div-with-direct-link so no
+        # section is skipped.
+        blocks = html.xpath(
+            '//div[contains(@class,"content")]'
+            '//*[self::p or self::li or self::h2 or self::h3 or self::h4'
+            ' or (self::div and a and not(.//p) and not(.//li))]'
         )
-        seen: set[str] = set()
-        urls: list[str] = []
-        for href in hrefs:
-            abs_url = urljoin(url, href)
-            if abs_url not in seen and "/c.html" in abs_url:
-                seen.add(abs_url)
-                urls.append(abs_url)
 
-        # Parse TOC entries preserving original design formatting.
-        # Original design patterns:
-        #   Simple:  <a><strong>Title</strong></a> /<kaishu>Author</kaishu>
-        #   Column:  <a><kaishu>Column</kaishu>│<strong>Title</strong></a>
-        #            /<kaishu>Author</kaishu>
-        #   Complex: <a>...<strong>Title</strong></a><br/>
-        #            <a>Subtitle</a> /<kaishu>Author</kaishu>
-        ps = html.xpath('//div[contains(@class,"content")]//p[.//a]')
+        seen_urls: set[str] = set()
+        seen_entry_urls: set[str] = set()
+        urls: list[str] = []
         entries: list[TocEntry] = []
-        for p in ps:
-            entry = self._parse_toc_paragraph(p, url)
-            if entry is not None:
-                entries.append(entry)
+        current_column = ""
+
+        for b in blocks:
+            hrefs = [urljoin(url, h) for h in b.xpath(".//a/@href")]
+            art_hrefs = [h for h in hrefs if "/c.html" in h and h != url]
+
+            if art_hrefs:
+                for h in art_hrefs:
+                    if h not in seen_urls:
+                        seen_urls.add(h)
+                        urls.append(h)
+                entry = self._parse_toc_paragraph(b, url)
+                if entry is not None and entry["url"] != url \
+                        and entry["url"] not in seen_entry_urls:
+                    if not entry["column"]:
+                        entry["column"] = current_column
+                    seen_entry_urls.add(entry["url"])
+                    entries.append(entry)
+            else:
+                text = b.xpath("string(.)").strip()
+                if text and self._looks_like_column_heading(text):
+                    current_column = text
+
+        # Safety net: catch article links living outside the walked block
+        # types (unknown wrappers) so no article is silently dropped —
+        # entry.py synthesizes a TOC row from the article page for these.
+        for h in html.xpath('//div[contains(@class,"content")]//a/@href'):
+            ab = urljoin(url, h)
+            if "/c.html" in ab and ab != url and ab not in seen_urls:
+                seen_urls.add(ab)
+                urls.append(ab)
 
         return {"urls": urls, "entries": entries}
 
@@ -185,14 +239,18 @@ class QiuShiCrawler:
         if "/c.html" not in href:
             return None
 
-        # title from <strong>
+        # title from <strong>; fall back to the link's own text (some 2026
+        # rows carry no <strong>)
         strongs = p.xpath(".//strong//text()")
         title = " ".join(t.strip() for t in strongs).strip()
         if not title:
+            title = links[0].xpath("string(.)").strip()
+        if not title:
             return None
 
-        # column from 楷体 span directly followed by │ inside the <a>,
-        # e.g. <a><span style="...楷体...">文化中国</span>│<strong>Title</strong></a>
+        # legacy inline column (2025 design): 楷体 span followed by │ inside
+        # the <a>. 2026 pages use standalone heading lines instead (handled
+        # by fetch_toc); keep this for backward compatibility.
         column = ""
         kaishu_spans = p.xpath(
             './/span[contains(@style,"楷体") or contains(@style,"KaiTi")]'
@@ -206,6 +264,21 @@ class QiuShiCrawler:
             if parent is not None and parent.tag == "a" and tail.startswith("│"):
                 column = ks_text
                 break
+
+        # 2026 variant: parenthetical column suffix inside the <a> AFTER the
+        # title, e.g. <a><strong>多一些“想法子办”</strong><span style="…楷体…">
+        # （党员来信）</span></a> — observed on the real 2026/14 TOC page.
+        # The title comes from <strong> only, so it stays clean.
+        if not column:
+            for ks in kaishu_spans:
+                parent = ks.getparent()
+                if parent is None or parent.tag != "a":
+                    continue
+                ks_text = ks.xpath("string(.)").strip()
+                m = re.fullmatch(r"[（(]([^（）()]{2,8})[）)]", ks_text)
+                if m:
+                    column = m.group(1)
+                    break
 
         # subtitle from second link after <br/> or ——
         subtitle = ""
@@ -239,6 +312,13 @@ class QiuShiCrawler:
                     if author:
                         author_role = author
                     author = ks_text
+
+        # plain-text author fallback (2026 rows: "<strong>标题</strong> /作者"
+        # with no 楷体 span): take the text after the last slash
+        if not author and slash_pos >= 0:
+            candidate = parent_text[slash_pos + 1:].strip()
+            if candidate and len(candidate) <= 40 and "http" not in candidate:
+                author = candidate
 
         return {
             "title": title,
@@ -315,6 +395,7 @@ class QiuShiCrawler:
             "content": [],
         }
 
+        first_text_block = True
         i = body_start
         while i < len(content_ps):
             p = content_ps[i]
@@ -354,7 +435,13 @@ class QiuShiCrawler:
                 fmt = self._detect_formatting(p)
                 # raw text content; gen_pdf.py applies LaTeX escaping
                 # detect author attribution for right-alignment
-                is_right = text.startswith("作者") or text.startswith("（作者")
+                is_right = fmt["right"] or text.startswith("作者") or text.startswith("（作者")
+                # letter salutation (信件抬头 "编辑同志："): short first body
+                # line ending with a full-width colon — flush left, no indent
+                is_left = fmt["left"]
+                if (first_text_block
+                        and re.fullmatch(r"[^：:，。；]{1,10}[：:]", text)):
+                    is_left = True
 
                 if text:
                     block: ContentBlock = {
@@ -364,11 +451,27 @@ class QiuShiCrawler:
                         "center": fmt["center"],
                         "large": fmt["large"],
                         "right": is_right,
+                        "left": is_left,
                         "font_family": fmt["font_family"],  # type: ignore[typeddict-item]
                         "font_size": fmt["font_size"],
                     }
                     result["content"].append(block)
+                    first_text_block = False
             i += 1
+
+        # ---- letter signature (信件署名) ------------------------------------
+        # Letters close with "单位名 作者名" as the LAST paragraph, right-
+        # aligned on the page. If the final text block ends with the author
+        # name and is short, right-align it (styles are not always inline).
+        if author:
+            for block in reversed(result["content"]):
+                if "text" in block:
+                    norm_text = re.sub(r"\s+", "", block["text"])
+                    if (norm_text.endswith(norm_author)
+                            and len(norm_text) <= 30
+                            and not block.get("center")):
+                        block["right"] = True
+                    break
 
         if with_qr:
             result["qrcode"] = self._gen_qr(url)

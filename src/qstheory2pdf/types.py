@@ -22,7 +22,8 @@ class TextBlock(TypedDict):
     italic: bool
     center: bool
     large: bool  # detected from font-size >= 18px
-    right: bool  # right-aligned (e.g. author attribution)
+    right: bool  # right-aligned (e.g. author attribution, letter signature)
+    left: bool  # flush left, no first-line indent (e.g. letter salutation 编辑同志：)
     font_family: FontFamily
     font_size: int  # pixels; 0 if not explicitly set
 
