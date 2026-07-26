@@ -282,13 +282,20 @@ class QiuShiCrawler:
         )
 
         # ---- subtitle / body_start detection in preamble --------------------
+        # The first few <p>s repeat column/title/subtitle/author; the author
+        # line marks the end of that preamble. Compare with ALL whitespace
+        # stripped: two-char names are spaced out on the page ("文 平" vs
+        # appellation "文平"). Scan only the first few paragraphs — letters
+        # end with a spaced signature that would otherwise match and swallow
+        # the whole body; articles without a preamble correctly keep 0.
         subtitle = ""
         body_start = 0
-        for i, p in enumerate(content_ps):
+        norm_author = re.sub(r"\s+", "", author)
+        for i, p in enumerate(content_ps[:5]):
             text = p.xpath("string(.)").strip()
             style = (p.get("style") or "").lower()
 
-            if author and text == author:
+            if author and re.sub(r"\s+", "", text) == norm_author:
                 body_start = i + 1
                 break
             if not author and i >= 1:
