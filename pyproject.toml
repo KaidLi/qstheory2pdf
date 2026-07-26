@@ -19,7 +19,7 @@ classifiers = [
     "Intended Audience :: Education",
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Natural Language :: Chinese (Simplified)",
-    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.10",
     "Operating System :: OS Independent",
     "Topic :: Text Processing :: Markup :: LaTeX",
 ]

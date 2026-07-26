@@ -1,13 +1,30 @@
 """CLI entry point for qstheory2pdf."""
 
 import argparse
+import re
 import sys
 
 # Force UTF-8 output on Windows, where the terminal defaults to GBK
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+import requests
+
 from qstheory2pdf import QiuShiCrawler, PDFGenerator
+
+
+def _issue_article_urls(toc_url: str, urls: list[str]) -> list[str]:
+    """Keep only URLs sharing the TOC page's /YYYYMMDD/ date segment.
+
+    The TOC page also links non-article pages (e.g. the year-index page,
+    which carries a different date); articles of an issue share the TOC's
+    publication date.
+    """
+    m = re.search(r"/(\d{8})/", toc_url)
+    if not m:
+        return urls
+    seg = f"/{m.group(1)}/"
+    return [u for u in urls if seg in u]
 
 
 def main() -> None:
@@ -41,7 +58,8 @@ def main() -> None:
         mode = "single"
     else:
         toc = crawler.fetch_toc(args.url)
-        mode = "issue" if len(toc["urls"]) >= 2 else "single"
+        article_urls = _issue_article_urls(args.url, toc["urls"])
+        mode = "issue" if len(article_urls) >= 2 else "single"
 
     # ---- single article ---------------------------------------------------
     if mode == "single":
@@ -61,8 +79,14 @@ def main() -> None:
         return
 
     # ---- full issue -------------------------------------------------------
-    toc_entries = toc["entries"]
-    print(f"整期模式: 共 {len(toc_entries)} 篇文章")
+    # Walk article_urls (page order); entries may miss rows whose TOC line
+    # had no <strong> title — synthesize those from the article page itself
+    # instead of silently dropping the article.
+    entry_by_url = {e["url"]: e for e in toc["entries"]}
+    missing = [u for u in article_urls if u not in entry_by_url]
+    if missing:
+        print(f"提示: {len(missing)} 个链接缺少目录条目，将使用文章页标题")
+    print(f"整期模式: 共 {len(article_urls)} 篇文章")
 
     pdf_gen = PDFGenerator(device=args.device)
     image_dir = pdf_gen.start()
@@ -70,16 +94,32 @@ def main() -> None:
         crawler.image_dir = image_dir
         articles = []
         matched_toc = []
-        for i, entry in enumerate(toc_entries, 1):
-            url = entry["url"]
-            print(f"  [{i}/{len(toc_entries)}] 下载中...", end=" ")
-            info = crawler.fetch_info(url, with_qr=False)
-            if info.get("content"):
-                articles.append(info)
-                matched_toc.append(entry)
-                print(info["title"][:30])
-            else:
+        failed = []
+        for i, url in enumerate(article_urls, 1):
+            print(f"  [{i}/{len(article_urls)}] 下载中...", end=" ")
+            try:
+                info = crawler.fetch_info(url, with_qr=False)
+            except requests.RequestException as e:
+                print(f"跳过 (下载失败: {e})")
+                failed.append(url)
+                continue
+            if not info.get("content"):
                 print("跳过 (无内容)")
+                continue
+            entry = entry_by_url.get(url) or {
+                "title": info.get("title", ""),
+                "column": "",
+                "subtitle": info.get("subtitle", ""),
+                "author": info.get("author", ""),
+                "author_role": "",
+                "url": url,
+            }
+            articles.append(info)
+            matched_toc.append(entry)
+            print(info["title"][:30])
+
+        if failed:
+            print(f"警告: {len(failed)} 篇文章下载失败，未包含在PDF中")
 
         if not articles:
             print("错误: 未能下载任何文章")
@@ -90,8 +130,13 @@ def main() -> None:
         issue_vol = articles[0].get("volume", "")
         issue_date = articles[0].get("date", "")
 
-        # download TOC page cover image for title page
-        cover_img = crawler.download_toc_cover(args.url)
+        # download TOC page cover image for title page (optional — fall back
+        # to the generated text title page on failure)
+        try:
+            cover_img = crawler.download_toc_cover(args.url)
+        except requests.RequestException as e:
+            print(f"警告: 封面下载失败，使用默认扉页 ({e})")
+            cover_img = None
 
         print(f"生成PDF ({len(articles)}篇)...")
         output = pdf_gen.gen_issue(

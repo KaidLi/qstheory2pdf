@@ -59,8 +59,11 @@ jobs:
 
       - name: Discover latest issue
         id: discover
+        env:
+          # Pass through env (not inline interpolation) to avoid shell injection
+          INPUT_URL: ${{ github.event.inputs.url }}
         run: |
-          uv run python scripts/discover_issue.py ${{ github.event.inputs.url }} > issue.json
+          uv run python scripts/discover_issue.py "$INPUT_URL" > issue.json
           cat issue.json
           {
             echo "url=$(jq -r .url issue.json)"

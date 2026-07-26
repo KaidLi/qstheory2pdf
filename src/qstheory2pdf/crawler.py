@@ -17,6 +17,10 @@ from qstheory2pdf.types import Article, ContentBlock, TocEntry, TocResult
 # Date pattern encoded in qstheory.cn article URLs: /YYYYMMDD/hash/c.html
 _DATE_URL_RE = re.compile(r"/(\d{4})(\d{2})(\d{2})/")
 
+# (connect, read) timeout for all HTTP requests — without this a stalled
+# connection hangs the CLI forever.
+_TIMEOUT = (10, 30)
+
 
 class QiuShiCrawler:
     """Crawl article metadata and content from qstheory.cn.
@@ -36,6 +40,12 @@ class QiuShiCrawler:
 
     # ---- helpers -------------------------------------------------------------
 
+    def _get(self, url: str) -> requests.Response:
+        """GET with timeout; raise on HTTP error status."""
+        resp = self.session.get(url, timeout=_TIMEOUT)
+        resp.raise_for_status()
+        return resp
+
     def _ensure_img_dir(self) -> None:
         os.makedirs(self.image_dir, exist_ok=True)
 
@@ -45,7 +55,7 @@ class QiuShiCrawler:
         fname = url.rsplit("/", 1)[-1]
         path = os.path.join(self.image_dir, fname)
         if not os.path.exists(path):
-            data = self.session.get(url).content
+            data = self._get(url).content
             with open(path, "wb") as f:
                 f.write(data)
         return fname
@@ -115,7 +125,7 @@ class QiuShiCrawler:
         Returns the filename (relative to image_dir), or None if no suitable
         image found.
         """
-        resp = self.session.get(url)
+        resp = self._get(url)
         resp.encoding = "utf-8"
         html = etree.HTML(resp.text)
         imgs = html.xpath('//div[contains(@class,"content")]//img')
@@ -134,7 +144,7 @@ class QiuShiCrawler:
             {"urls": [list of article URLs in order],
              "entries": [parallel list of TocEntry dicts, may be shorter]}
         """
-        resp = self.session.get(url)
+        resp = self._get(url)
         resp.encoding = "utf-8"
         html = etree.HTML(resp.text)
 
@@ -181,23 +191,21 @@ class QiuShiCrawler:
         if not title:
             return None
 
-        # column from 楷体 span before │
+        # column from 楷体 span directly followed by │ inside the <a>,
+        # e.g. <a><span style="...楷体...">文化中国</span>│<strong>Title</strong></a>
         column = ""
         kaishu_spans = p.xpath(
             './/span[contains(@style,"楷体") or contains(@style,"KaiTi")]'
         )
         for ks in kaishu_spans:
             ks_text = ks.xpath("string(.)").strip()
-            if ks_text and ks.getparent().tag == "a":
-                parent_html = etree.tostring(ks.getparent(), encoding="unicode")
-                if "│" in parent_html:
-                    idx_ks = parent_html.find(
-                        f'<span style="font-family: 楷体;">{ks_text}'
-                    )
-                    idx_pipe = parent_html.find("│")
-                    if idx_ks >= 0 and idx_pipe >= 0 and idx_ks < idx_pipe:
-                        column = ks_text
-                        break
+            if not ks_text:
+                continue
+            parent = ks.getparent()
+            tail = (ks.tail or "").lstrip()
+            if parent is not None and parent.tag == "a" and tail.startswith("│"):
+                column = ks_text
+                break
 
         # subtitle from second link after <br/> or ——
         subtitle = ""
@@ -214,14 +222,17 @@ class QiuShiCrawler:
                 subtitle = m.group(1).strip()
 
         # author / author_role from 楷体 span after /
+        # The slash may sit outside the span (…</a> /<span>作者</span>) or
+        # inside it (<span>/习近平</span>) — strip a leading slash from the
+        # span text before matching.
         author = ""
         author_role = ""
+        parent_text = p.xpath("string(.)").strip()
+        slash_pos = parent_text.rfind("/")
         for ks in kaishu_spans:
-            ks_text = ks.xpath("string(.)").strip()
+            ks_text = ks.xpath("string(.)").strip().lstrip("/").strip()
             if not ks_text:
                 continue
-            parent_text = p.xpath("string(.)").strip()
-            slash_pos = parent_text.rfind("/")
             if slash_pos >= 0:
                 after_slash = parent_text[slash_pos + 1:].strip()
                 if ks_text in after_slash:
@@ -244,7 +255,7 @@ class QiuShiCrawler:
         Returns an Article TypedDict. Image paths inside `content` and the
         optional `qrcode` field are relative to `self.image_dir`.
         """
-        resp = self.session.get(url)
+        resp = self._get(url)
         resp.encoding = "utf-8"
         html = etree.HTML(resp.text)
 
@@ -257,7 +268,7 @@ class QiuShiCrawler:
         volume = ""
         author = ""
         for el in app_els:
-            text = el.text.strip() if el.text else ""
+            text = el.xpath("string(.)").strip()
             if text.startswith("来源") and "求是" in text:
                 volume = text[2:]
                 m = re.search(r"《求是》\d{4}/\d{2}", volume)

@@ -77,10 +77,11 @@ def _discover_via_mulu(session: requests.Session) -> dict | None:
     # Step 3: fetch the year index page and parse all issue links
     tree = _fetch_tree(session, year_url)
 
-    best: tuple[int, str] | None = None  # (issue_number, url)
+    best: tuple[int, str, str] | None = None  # (issue_number, url, year)
     for a_tag in tree.xpath("//a"):
         text = a_tag.text_content().strip()
-        m = re.match(r"(\d{4})年第(\d+)期$", text)
+        # Link text is e.g. "《求是》2026年第14期" — anchor only at the end.
+        m = re.search(r"(\d{4})年第(\d+)期$", text)
         if not m:
             continue
         href = (a_tag.get("href") or "").strip()
@@ -89,10 +90,10 @@ def _discover_via_mulu(session: requests.Session) -> dict | None:
         year, num = m.group(1), m.group(2)
         issue_num = int(num)
         if best is None or issue_num > best[0]:
-            best = (issue_num, href)
+            best = (issue_num, href, year)
 
     if best:
-        return _result(best[1], year, best[0])
+        return _result(best[1], best[2], best[0])
     return None
 
 
@@ -101,7 +102,7 @@ def _discover_via_homepage(session: requests.Session) -> dict | None:
     tree = _fetch_tree(session, BASE + "/")
     for a_tag in tree.xpath("//a"):
         text = a_tag.text_content().strip()
-        m = re.match(r"(\d{4})年第(\d+)期$", text)
+        m = re.search(r"(\d{4})年第(\d+)期$", text)
         if not m:
             continue
         href = (a_tag.get("href") or "").strip()
