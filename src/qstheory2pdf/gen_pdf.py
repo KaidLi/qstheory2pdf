@@ -255,6 +255,8 @@ class PDFGenerator:
             output_dir = os.path.join(os.getcwd(), "output")
             os.makedirs(output_dir, exist_ok=True)
             output_path = os.path.join(output_dir, _safe_name(info.get("title", "output")) + ".pdf")
+        else:
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         shutil.copy(pdf_src, output_path)
         return output_path
 
@@ -295,6 +297,8 @@ class PDFGenerator:
             os.makedirs(output_dir, exist_ok=True)
             safe_vol = _safe_name(issue_volume)
             output_path = os.path.join(output_dir, f"{safe_vol}.pdf")
+        else:
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         shutil.copy(pdf_src, output_path)
         return output_path
 

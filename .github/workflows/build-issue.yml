@@ -86,8 +86,12 @@ jobs:
       - name: Build PDF
         if: steps.check.outputs.exists == 'false'
         run: |
+          # GitHub strips non-ASCII chars from release asset names
+          # (求是_2026_14.pdf → _2026_14.pdf), so name the file after the
+          # ASCII release tag instead.
           uv run qstheory2pdf \
             -d "${{ inputs.device || 'normal' }}" \
+            -o "output/${{ steps.discover.outputs.tag }}.pdf" \
             "${{ steps.discover.outputs.url }}"
 
       - name: Create Release
