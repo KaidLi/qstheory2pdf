@@ -41,6 +41,12 @@ def main() -> None:
         help="阅读设备 (默认: normal)",
     )
     parser.add_argument(
+        "-f", "--font",
+        choices=["auto", "wenkai"],
+        default="auto",
+        help="字体方案: auto=开源字体自动探测(默认), wenkai=全文霞鹜文楷",
+    )
+    parser.add_argument(
         "-o", "--output",
         default=None,
         help="输出PDF路径 (默认自动命名)",
@@ -64,7 +70,7 @@ def main() -> None:
     # ---- single article ---------------------------------------------------
     if mode == "single":
         print(f"单篇文章模式: {args.url}")
-        pdf_gen = PDFGenerator(device=args.device)
+        pdf_gen = PDFGenerator(device=args.device, font=args.font)
         image_dir = pdf_gen.start()
         try:
             crawler.image_dir = image_dir
@@ -88,7 +94,7 @@ def main() -> None:
         print(f"提示: {len(missing)} 个链接缺少目录条目，将使用文章页标题")
     print(f"整期模式: 共 {len(article_urls)} 篇文章")
 
-    pdf_gen = PDFGenerator(device=args.device)
+    pdf_gen = PDFGenerator(device=args.device, font=args.font)
     image_dir = pdf_gen.start()
     try:
         crawler.image_dir = image_dir

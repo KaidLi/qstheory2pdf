@@ -56,6 +56,7 @@ uv run qstheory2pdf [-d 设备] [-o 输出路径] [-s] <url>
 |------|------|
 | `url` | 文章页或目录页 URL（必填） |
 | `-d, --device` | 阅读设备预设，默认 `normal` |
+| `-f, --font` | 字体方案：`auto`（默认，开源字体自动探测）/ `wenkai`（全文霞鹜文楷） |
 | `-o, --output` | 输出 PDF 路径，默认自动命名到 `output/` 目录 |
 | `-s, --single` | 强制按单篇文章模式处理（即使 URL 是目录页） |
 
@@ -69,6 +70,8 @@ uv run qstheory2pdf [-d 设备] [-o 输出路径] [-s] <url>
 | `scribe` | 5.83×7.76 in | Kindle Scribe |
 | `screen` | 25.4×19.05 cm | 显示器 |
 | `pc` | 6.2×6 in | PC 窗口 |
+
+彩色屏设备（normal/pad/screen/pc）使用「求是红」主题色；墨水屏设备（kindle/scribe）自动使用纯黑主题（彩色在墨水屏上会抖成脏灰）。
 
 ## 示例
 
@@ -96,15 +99,31 @@ uv run qstheory2pdf -d kindle -o my.pdf https://www.qstheory.cn/20260415/eb2be76
 uv run qstheory2pdf -s https://www.qstheory.cn/20260415/94280df5956349b0954c44d728bb75a1/c.html
 ```
 
-## 跨平台字体设置
+## 字体（三端一致的开源方案）
 
-Windows 无需额外配置。在 **macOS 或 Linux** 上运行时，将 `src/qstheory2pdf/resource/qiushi.cls` 中的 `fontset=windows` 改为 `fontset=fandol`：
+`qiushi.cls` 优先使用开源字体组合——只要装了这些字体，Windows / macOS / Linux(CI) 的输出**完全一致**，且生僻字（祎、頔、赟、曌……）全覆盖：
+
+| 用途 | 字体 |
+|------|------|
+| 正文（宋体） | 思源宋体 / Noto Serif CJK SC |
+| 标题（黑体） | 思源黑体 / Noto Sans CJK SC |
+| 楷体（作者、图注、引文） | 霞鹜文楷 LXGW WenKai |
+
+安装方法：
+
+- **Linux / CI**：`sudo apt install fonts-noto-cjk fonts-lxgw-wenkai`（GitHub Actions 的 workflow 已包含）
+- **Windows / macOS**：下载后安装即可（Windows 建议右键「为所有用户安装」，否则 xelatex 可能找不到）：
+  - 霞鹜文楷：[lxgw/LxgwWenKai Releases](https://github.com/lxgw/LxgwWenKai/releases)（下载 `LXGWWenKai-Regular.ttf`、`-Medium.ttf`、`-Light.ttf` 三个）
+  - 思源宋体：[adobe-fonts/source-han-serif](https://github.com/adobe-fonts/source-han-serif/releases)（SubsetOTF 的 SC 版）或 Noto Serif CJK
+  - 思源黑体：[adobe-fonts/source-han-sans](https://github.com/adobe-fonts/source-han-sans/releases)（SubsetOTF 的 SC 版）或 Noto Sans CJK
+
+没装也能用：会按「开源组合 → Windows 系统字体 → macOS 系统字体 → Fandol 兜底」的顺序自动回退（Fandol 生僻字覆盖有限，不推荐依赖）。
+
+喜欢全文楷体的阅读风格？加 `-f wenkai` 即可让全文（含西文）都用霞鹜文楷：
 
 ```bash
-sed -i 's/fontset=windows/fontset=fandol/' src/qstheory2pdf/resource/qiushi.cls
+uv run qstheory2pdf -f wenkai <url>
 ```
-
-Fandol 字体随 `texlive-lang-chinese` 安装，无需额外操作。
 
 ## 输出
 
@@ -123,7 +142,7 @@ PDF 文件默认保存到当前目录下的 `output/` 文件夹，文件名由�
 3. 未发布 → 构建 PDF → 发布 Release 并上传附件
 4. 已发布 → 跳过
 
-**字体**：CI 环境自动完成字体切换和覆盖注释，无需额外配置。
+**字体**：workflow 安装 Noto CJK 与霞鹜文楷，`qiushi.cls` 自动检测使用，无需任何手动切换。手动触发时可在 `font` 下拉框选 `wenkai` 生成全文楷版本。
 
 ## 故障排查
 
@@ -131,7 +150,9 @@ PDF 文件默认保存到当前目录下的 `output/` 文件夹，文件名由�
 |------|---------|---------|
 | `command not found: uv` | uv 未安装 | 按上方「准备」章节安装 uv |
 | `xelatex not found` | TeX Live 未安装或未加入 PATH | 安装 TeX Live，确保 xelatex 在 PATH 中 |
-| 编译时报字体错误 | 非 Windows 系统缺少中文字体 | 按上方「跨平台字体设置」切换为 fandol |
+| 编译时报字体错误 | 缺少中文字体 | 按「字体」章节安装开源字体 |
+| 生僻字显示为空白或 � | 回退到了 Fandol 字体（覆盖不全） | 安装思源/Noto + 霞鹜文楷后重新生成 |
+| Windows 装了字体但没生效 | 字体装到了当前用户目录 | 重新右键选「为所有用户安装」 |
 | 终端输出中文乱码 | Windows 终端默认编码为 GBK | 升级到最新版，此问题已修复 |
 
 ## 致谢

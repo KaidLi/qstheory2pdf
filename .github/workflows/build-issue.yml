@@ -23,6 +23,14 @@ on:
           - kindle
           - screen
           - pc
+      font:
+        description: '字体方案（auto = 开源字体自动探测；wenkai = 全文霞鹜文楷）'
+        required: false
+        type: choice
+        default: 'auto'
+        options:
+          - auto
+          - wenkai
 
 jobs:
   build:
@@ -37,6 +45,9 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
+      # fonts-noto-cjk: 中文主字体（生僻字全覆盖，修复 祎/頔/赟 等缺字）
+      # fonts-lxgw-wenkai: 楷体（作者/图注/引文），同样全覆盖
+      # qiushi.cls 会自动检测并使用这些字体，无需再 sed 切换 fontset
       - name: Install TeX Live
         run: |
           sudo apt-get update -qq
@@ -46,11 +57,9 @@ jobs:
             texlive-latex-extra \
             texlive-fonts-recommended \
             texlive-fonts-extra \
-            texlive-bibtex-extra \
-            texlive-lang-chinese
-
-      - name: Switch fontset for Linux
-        run: sed -i 's/fontset=windows/fontset=fandol/' src/qstheory2pdf/resource/qiushi.cls
+            texlive-lang-chinese \
+            fonts-noto-cjk \
+            fonts-lxgw-wenkai
 
       - name: Sync dependencies
         run: uv sync
@@ -88,6 +97,7 @@ jobs:
         if: steps.check.outputs.exists == 'false'
         env:
           DEVICE: ${{ inputs.device || 'both' }}
+          FONT: ${{ inputs.font || 'auto' }}
           URL: ${{ steps.discover.outputs.url }}
           TAG: ${{ steps.discover.outputs.tag }}
         run: |
@@ -98,7 +108,7 @@ jobs:
           build() {
             local dev="$1" suffix=""
             [ "$dev" != "normal" ] && suffix="-$dev"
-            uv run qstheory2pdf -d "$dev" -o "output/${TAG}${suffix}.pdf" "$URL"
+            uv run qstheory2pdf -d "$dev" -f "$FONT" -o "output/${TAG}${suffix}.pdf" "$URL"
           }
           if [ "$DEVICE" = "both" ]; then
             build normal

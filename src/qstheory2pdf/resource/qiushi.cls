@@ -1,10 +1,19 @@
-% Author: Dongsheng Deng
-% Homepage: https://ddswhu.me/
-% Email: elegantlatex2e@gmail.com
-% Lastest Version: https://github.com/ElegantLaTeX/ElegantNote
+% qiushi.cls — LaTeX class for qstheory2pdf (forked from ElegantNote)
+% Upstream author: Dongsheng Deng (ElegantLaTeX/ElegantNote)
+%
+% 2026-07 revision:
+%   * Cross-platform Chinese font auto-detection — no more manual/sed
+%     fontset switching. Priority: Windows (SimSun) > macOS (Songti SC)
+%     > Noto CJK (Linux/CI, FULL rare-glyph coverage: 祎/頔/赟/曌 …)
+%     > Fandol (last resort; limited GBK coverage).
+%   * New "qiushi" color theme (deep red accent) used on LCD/paper
+%     devices; e-ink devices keep pure black.
+%   * Typographic polish: heiti headlines, fangsong bylines, short rule
+%     ornaments, quieter header/footer, magazine-style TOC macros.
+%   * Removed unused biblatex hooks (no bibliography in this pipeline).
 
 % --- Class structure: identification part
-\ProvidesClass{qiushi}[2022/06/17 QiuShi v0.1 class]
+\ProvidesClass{qiushi}[2026/07/26 QiuShi v0.2 class]
 \NeedsTeXFormat{LaTeX2e}
 
 
@@ -15,8 +24,9 @@
 \SetupKeyvalOptions{family=ELEGANT,prefix=ELEGANT@,setkeys=\kvsetkeys}
 \newcommand{\ekv}[1]{\kvsetkeys{ELEGANT}{#1}}
 
-\DeclareStringOption[blue]{color}
+\DeclareStringOption[qiushi]{color}
 \DeclareVoidOption{black}{\ekv{color=black}}
+\DeclareVoidOption{qiushi}{\ekv{color=qiushi}}
 
 \DeclareStringOption[pad]{device}
 \DeclareVoidOption{pc}{\ekv{device=pc}}
@@ -33,12 +43,7 @@
 
 \DeclareStringOption[ctexfont]{chinesefont}
 \DeclareVoidOption{ctexfont}{\ekv{chinesefont=ctexfont}}
-
-\DeclareStringOption[numeric-comp]{citestyle}
-\DeclareStringOption[numeric]{bibstyle}
-
-\DeclareStringOption[biber]{bibend}
-
+\DeclareVoidOption{wenkai}{\ekv{chinesefont=wenkai}}
 
 \DeclareStringOption[11pt]{fontsize}
 \DeclareVoidOption{11pt}{\ekv{fontsize=11pt}}
@@ -68,7 +73,7 @@
     BoldItalicFont = *-bolditalic ,
     Extension = .otf ,
     Scale = 1.0]
-    
+
   \setsansfont{texgyreheros}[
     UprightFont = *-regular ,
     BoldFont = *-bold ,
@@ -84,30 +89,95 @@
 
 
 \ifdefstring{\ELEGANT@lang}{cn}{
-  \ifdefstring{\ELEGANT@chinesefont}{founder}{
-    \RequirePackage[UTF8,scheme=plain,fontset=none]{ctex}
-    \setCJKmainfont[BoldFont={FZHei-B01},ItalicFont={FZKai-Z03}]{FZShuSong-Z01}
-    \setCJKsansfont[BoldFont={FZHei-B01}]{FZKai-Z03}
-    \setCJKmonofont[BoldFont={FZHei-B01}]{FZFangSong-Z02}
-    \setCJKfamilyfont{zhsong}{FZShuSong-Z01}
-    \setCJKfamilyfont{zhhei}{FZHei-B01}
-    \setCJKfamilyfont{zhkai}[BoldFont={FZHei-B01}]{FZKai-Z03}
-    \setCJKfamilyfont{zhfs}[BoldFont={FZHei-B01}]{FZFangSong-Z02}
-    \newcommand*{\songti}{\CJKfamily{zhsong}}
-    \newcommand*{\heiti}{\CJKfamily{zhhei}}
-    \newcommand*{\kaishu}{\CJKfamily{zhkai}}
-    \newcommand*{\fangsong}{\CJKfamily{zhfs}}}{\relax}
-  
-  \ifdefstring{\ELEGANT@chinesefont}{nofont}{
-    \RequirePackage[UTF8,scheme=plain,fontset=none]{ctex}}{\relax}
+  % ================================================================
+  % 字体策略：开源字体优先，三端（Windows/macOS/Linux·CI）输出一致
+  %
+  %   探测顺序（chinesefont=ctexfont，默认）：
+  %     1. 开源组合：思源宋体/Noto Serif（正文）+ 思源黑体/Noto Sans
+  %        （标题）+ 霞鹜文楷（楷体，作者/图注/引文）
+  %        —— 生僻字全覆盖（祎/頔/赟/曌…），装了这些字体即用
+  %     2. 回退 Windows 系统字体（SimSun 等）
+  %     3. 回退 macOS 系统字体（Songti SC 等）
+  %     4. 兜底 Fandol（TeX Live 自带；生僻字覆盖有限）
+  %
+  %   chinesefont=wenkai：全文使用霞鹜文楷（含西文），适合休闲阅读；
+  %   未安装文楷时告警并回退到上面的自动探测。
+  % ================================================================
+  %
+  % ---- 探测开源字体（Noto 与思源为同一字体的两种发行名）----
+  \IfFontExistsTF{Noto Serif CJK SC}{\def\qs@song{Noto Serif CJK SC}}{%
+    \IfFontExistsTF{Source Han Serif SC}{\def\qs@song{Source Han Serif SC}}{%
+      \def\qs@song{}}}
+  \IfFontExistsTF{Noto Sans CJK SC}{\def\qs@hei{Noto Sans CJK SC}}{%
+    \IfFontExistsTF{Source Han Sans SC}{\def\qs@hei{Source Han Sans SC}}{%
+      \def\qs@hei{}}}
+  \IfFontExistsTF{LXGW WenKai}{\def\qs@kai{LXGW WenKai}}{%
+    \IfFontExistsTF{LXGW WenKai GB}{\def\qs@kai{LXGW WenKai GB}}{%
+      \IfFontExistsTF{FandolKai}{\def\qs@kai{FandolKai}}{\def\qs@kai{}}}}
 
-  \ifdefstring{\ELEGANT@chinesefont}{ctexfont}{
-    \RequirePackage[UTF8,scheme=plain,fontset=windows]{ctex}
-    \providecommand{\songti}{\CJKfamily{zhsong}}
-    \providecommand{\heiti}{\CJKfamily{zhhei}}
-    \providecommand{\kaishu}{\CJKfamily{zhkai}}
-    \providecommand{\fangsong}{\CJKfamily{zhfs}}}{\relax}
-  
+  % ---- wenkai 模式前置检查：未装文楷则回退自动 ----
+  \ifdefstring{\ELEGANT@chinesefont}{wenkai}{%
+    \IfFontExistsTF{LXGW WenKai}{\relax}{%
+      \IfFontExistsTF{LXGW WenKai GB}{\relax}{%
+        \ClassWarningNoLine{qiushi}{chinesefont=wenkai but LXGW WenKai not
+          found; falling back to automatic font detection}%
+        \ekv{chinesefont=ctexfont}}}}{\relax}
+
+  % ---- 全文楷模式 ----
+  \ifdefstring{\ELEGANT@chinesefont}{wenkai}{%
+    \RequirePackage[UTF8,scheme=plain,fontset=none]{ctex}%
+    \IfFontExistsTF{LXGW WenKai}{\def\qs@wk{LXGW WenKai}}{\def\qs@wk{LXGW WenKai GB}}%
+    \IfFontExistsTF{LXGW WenKai Medium}{\def\qs@wkm{LXGW WenKai Medium}}{\edef\qs@wkm{\qs@wk}}%
+    \IfFontExistsTF{LXGW WenKai Light}{\def\qs@wkl{LXGW WenKai Light}}{\edef\qs@wkl{\qs@wk}}%
+    % 西文一并用文楷，风格统一（文楷的西文来自 Klee One，观感很好）
+    \setmainfont[BoldFont={\qs@wkm}]{\qs@wk}%
+    \setCJKmainfont[BoldFont={\qs@wkm}]{\qs@wk}%
+    \setCJKsansfont{\qs@wkm}%
+    \setCJKmonofont{\qs@wk}%
+    \setCJKfamilyfont{zhsong}[BoldFont={\qs@wkm}]{\qs@wk}%
+    \setCJKfamilyfont{zhhei}{\qs@wkm}%
+    \setCJKfamilyfont{zhkai}{\qs@wk}%
+    \setCJKfamilyfont{zhfs}{\qs@wkl}%
+    \providecommand{\songti}{\CJKfamily{zhsong}}%
+    \providecommand{\heiti}{\CJKfamily{zhhei}}%
+    \providecommand{\kaishu}{\CJKfamily{zhkai}}%
+    \providecommand{\fangsong}{\CJKfamily{zhfs}}%
+  }{\relax}
+
+  % ---- 自动探测模式（默认）----
+  \ifdefstring{\ELEGANT@chinesefont}{ctexfont}{%
+    \ifdefempty{\qs@song}{%
+      % 开源宋体缺失 → 回退系统字体 / Fandol
+      \IfFontExistsTF{SimSun}{\def\qs@fontset{windows}}{%
+        \IfFontExistsTF{Songti SC}{\def\qs@fontset{mac}}{%
+          \def\qs@fontset{fandol}}}%
+      \RequirePackage[UTF8,scheme=plain,fontset=\qs@fontset]{ctex}%
+      \providecommand{\songti}{\CJKfamily{zhsong}}%
+      \providecommand{\heiti}{\CJKfamily{zhhei}}%
+      \providecommand{\kaishu}{\CJKfamily{zhkai}}%
+      \providecommand{\fangsong}{\CJKfamily{zhfs}}%
+    }{%
+      % 开源组合（首选）
+      \RequirePackage[UTF8,scheme=plain,fontset=none]{ctex}%
+      \ifdefempty{\qs@hei}{\edef\qs@hei{\qs@song}}{\relax}%
+      \ifdefempty{\qs@kai}{%
+        \IfFontExistsTF{Noto Serif CJK SC Light}%
+          {\def\qs@kai{Noto Serif CJK SC Light}}{\edef\qs@kai{\qs@song}}}{\relax}%
+      \IfFontExistsTF{FandolFang}{\def\qs@fs{FandolFang}}{\edef\qs@fs{\qs@kai}}%
+      \setCJKmainfont{\qs@song}%
+      \setCJKsansfont{\qs@hei}%
+      \IfFontExistsTF{Noto Sans Mono CJK SC}%
+        {\setCJKmonofont{Noto Sans Mono CJK SC}}{\setCJKmonofont{\qs@hei}}%
+      \setCJKfamilyfont{zhsong}{\qs@song}%
+      \setCJKfamilyfont{zhhei}{\qs@hei}%
+      \setCJKfamilyfont{zhkai}{\qs@kai}%
+      \setCJKfamilyfont{zhfs}{\qs@fs}%
+      \providecommand{\songti}{\CJKfamily{zhsong}}%
+      \providecommand{\heiti}{\CJKfamily{zhhei}}%
+      \providecommand{\kaishu}{\CJKfamily{zhkai}}%
+      \providecommand{\fangsong}{\CJKfamily{zhfs}}%
+    }}{\relax}
+
   \AfterEndPreamble{
     \setlength\parindent{2\ccwd}%
     \setlength\emergencystretch{3\ccwd}}
@@ -128,33 +198,6 @@
 \else
   \newcommand{\cfs}{\normalfont}
 \fi
-
-
-\ifdefstring{\ELEGANT@math}{newtx}{
-  \RequirePackage{newtxmath}
-  \let\Bbbk\relax
-  \RequirePackage{esint}
-  %%% use yhmath pkg, uncomment following code
-  % \let\oldwidering\widering
-  % \let\widering\undefined
-  % \RequirePackage{yhmath}
-  % \let\widering\oldwidering
-
-  %%% use esvect pkg, uncomment following code
-  % \RequirePackage{esvect}
-
-  \DeclareSymbolFont{CMlargesymbols}{OMX}{cmex}{m}{n}
-  \let\sumop\relax\let\prodop\relax
-  \DeclareMathSymbol{\sumop}{\mathop}{CMlargesymbols}{"50}
-  \DeclareMathSymbol{\prodop}{\mathop}{CMlargesymbols}{"51}
-}{\relax}
-
-
-\RequirePackage[
-  backend=\ELEGANT@bibend,
-  citestyle=\ELEGANT@citestyle,
-  bibstyle=\ELEGANT@bibstyle]{biblatex}
-
 
 \RequirePackage{appendix}
 
@@ -179,31 +222,10 @@
   \renewcommand\tablename{表}
   \newcommand\versiontext{版本：}%
   \newcommand\updatetext{来源：}%
-  \newcommand\ebibname{参考文献}
   \setlength{\parindent}{2em}
   \newcommand{\keywords}[1]{%
     \vskip2ex\par\noindent\normalfont{\bfseries 关键词: } #1}
   }{\relax}
-
-\ifdefstring{\ELEGANT@lang}{en}{
-  \theoremstyle{plain}% default
-  \newtheorem{theorem}{Theorem}[section] %
-  \newtheorem{lemma}[theorem]{Lemma} %
-  \newtheorem{proposition}[theorem]{Proposition} %
-  \newtheorem*{corollary}{Corollary} %
-  \theoremstyle{definition} %
-  \newtheorem{definition}{Definition}[section] %
-  \newtheorem{conjecture}{Conjecture}[section] %
-  \newtheorem{example}{Example}[section] %
-  \theoremstyle{remark} %
-  \newtheorem*{remark}{Remark} %
-  \newtheorem*{note}{Note} %
-  \newcommand\ebibname{Bibliography}
-  \newtheorem{case}{Case} 
-  \renewcommand*{\proofname}{%
-    \normalfont\bfseries\color{ecolor} Proof}
-  \newcommand\versiontext{Version: }%
-  \newcommand\updatetext{Update: }}{\relax}
 
 \RequirePackage{indentfirst}
 \RequirePackage{anyfontsize}
@@ -214,7 +236,7 @@
 
 \RequirePackage{xcolor}
 \definecolor{winered}{rgb}{0.5,0,0}
-\definecolor{epubblue}{RGB}{1,126,218}
+\definecolor{qsgray}{RGB}{110,110,110}
 
 \RequirePackage{hyperref}
 \RequirePackage{xpatch}
@@ -240,11 +262,9 @@
 \widowpenalty=10000
 \clubpenalty=10000
 \raggedbottom
-% 定义护眼模式 geye=true
-\RequirePackage{xcolor}
 \RequirePackage{silence}
 
-% good for eye color 
+% 护眼模式
 \ifdefstring{\ELEGANT@mode}{geye}{
   \definecolor{geyecolor}{RGB}{199,237,204}%
   \pagecolor{geyecolor}
@@ -285,8 +305,8 @@
   \color{ecolor}\bfseries}{}{
   0.5em}{}
 
-% caption settings 
-\RequirePackage{caption} 
+% caption settings
+\RequirePackage{caption}
 \captionsetup{
   labelfont={bf,color=ecolor}}
 \captionsetup[table]{skip=3pt}
@@ -301,34 +321,24 @@
 \setlength{\footnotesep}{12pt}
 
 \RequirePackage{titlesec}
-\titleformat*{\section}{\normalfont\Large\bfseries\color{ecolor}}
-\titleformat*{\subsection}{\normalfont\large\bfseries\color{ecolor}}
-\titleformat*{\subsubsection}{\normalfont\normalsize\bfseries\color{ecolor}}
+\titleformat*{\section}{\normalfont\Large\heiti\bfseries\color{ecolor}}
+\titleformat*{\subsection}{\normalfont\large\heiti\bfseries\color{ecolor}}
+\titleformat*{\subsubsection}{\normalfont\normalsize\heiti\bfseries\color{ecolor}}
 
-\ifdefstring{\ELEGANT@color}{green}{
-  \definecolor{ecolor}{RGB}{0,120,2}%
-}{\relax}
-\ifdefstring{\ELEGANT@color}{cyan}{
-  \definecolor{ecolor}{RGB}{31,186,190}%
-}{\relax}
-\ifdefstring{\ELEGANT@color}{blue}{
-  \definecolor{ecolor}{RGB}{1,126,218}%
-}{\relax}
-\ifdefstring{\ELEGANT@color}{sakura}{
-  \definecolor{ecolor}{RGB}{255,183,197}%
+% ---- color themes ----------------------------------------------------
+% qiushi: deep magazine red for LCD/paper reading; black: pure black,
+% for e-ink devices where color dithers to muddy gray.
+\ifdefstring{\ELEGANT@color}{qiushi}{
+  \definecolor{ecolor}{RGB}{166,27,31}%
 }{\relax}
 \ifdefstring{\ELEGANT@color}{black}{
   \definecolor{ecolor}{RGB}{0,0,0}%
 }{\relax}
-\ifdefstring{\ELEGANT@color}{brown}{
-  \definecolor{ecolor}{RGB}{109,62,18}%
+% legacy option value kept working (ElegantNote heritage)
+\ifdefstring{\ELEGANT@color}{blue}{
+  \definecolor{ecolor}{RGB}{1,126,218}%
 }{\relax}
-
-\definecolor{egreen}{RGB}{0,120,2}
-\definecolor{ecyan}{RGB}{0,175,152}
-\definecolor{eblue}{RGB}{20,50,104}
-\definecolor{sakura}{RGB}{255,183,197}
-\definecolor{brown}{RGB}{109,62,18}
+\providecolor{ecolor}{RGB}{0,0,0}
 
 %% device settings
 %% default=pad
@@ -348,12 +358,14 @@
     paperwidth=6in,
     paperheight=8in,
     includefoot,
+    headheight=15pt,
     margin=8mm}}{%
   \relax}
 
 \ifdefstring{\ELEGANT@device}{pc}{
   \geometry{%
     margin=8mm,
+    headheight=15pt,
     paperwidth=6.2in,
     paperheight=6in,
     includefoot}}{%
@@ -362,14 +374,22 @@
 \ifdefstring{\ELEGANT@device}{kindle}{%
   \geometry{
     margin=8mm,
-    paperwidth=3.68in, 
+    headheight=15pt,
+    paperwidth=3.68in,
     paperheight=4.92in}}{%
   \relax}
 
+% A4: slightly wider side margins and asymmetric top/bottom for a calmer
+% page; includehead keeps the running head out of the text block.
 \ifdefstring{\ELEGANT@device}{normal}{%
   \geometry{
-    margin=1in,
-    a4paper}}{%
+    a4paper,
+    hmargin=2.6cm,
+    top=2.4cm,
+    bottom=2.8cm,
+    headheight=16pt,
+    headsep=0.7cm,
+    footskip=1.2cm}}{%
   \relax}
 
 \ifdefstring{\ELEGANT@device}{screen}{%
@@ -396,30 +416,66 @@
 
 % headings
 \RequirePackage{fancyhdr}
-\renewcommand{\headrulewidth}{0.4pt}
 \renewcommand{\footrulewidth}{0pt}
 
 \def\issuevolume{}
 
+% Header rule only when there is header content (issue mode); single
+% articles previously got a stray bare rule at the top of every page.
+\renewcommand{\headrulewidth}{\ifx\issuevolume\empty 0pt\else 0.3pt\fi}
+
 \fancypagestyle{fancy-note}{
   \fancyhf{} % clear header/footer settings
-  \fancyfoot[C]{\footnotesize \thepage}
+  \fancyfoot[C]{\footnotesize\color{qsgray}— \thepage\ —}
   \ifx\issuevolume\empty
     \fancyhead[C]{}
   \else
-    \fancyhead[C]{\footnotesize\kaishu \issuevolume}
+    \fancyhead[C]{\footnotesize\kaishu\color{qsgray}\issuevolume}
   \fi
 }
 
 \fancypagestyle{plain}{%
   \fancyhf{}
-  \fancyfoot[C]{\footnotesize\thepage}}
+  \renewcommand{\headrulewidth}{0pt}%
+  \fancyfoot[C]{\footnotesize\color{qsgray}— \thepage\ —}}
 
 \pagestyle{fancy-note}
 
+% ---- article title furniture (used by gen_pdf.py) --------------------
+% 栏目 tag, headline, subtitle, byline, closing rule, and in-body
+% section heading. Centralized here so every device/theme renders a
+% consistent title block.
+\newcommand{\qscolumn}[1]{%
+  {\centering\small\kaishu\color{ecolor}〔#1〕\par}}
+\newcommand{\qstitle}[1]{%
+  {\centering\LARGE\heiti\bfseries #1\par}}
+\newcommand{\qssubtitle}[1]{%
+  {\centering\large\kaishu\color{qsgray}#1\par}}
+\newcommand{\qsauthor}[1]{%
+  {\centering\normalsize\fangsong #1\par}}
+\newcommand{\qstitlerule}{%
+  {\centering\color{ecolor}\rule{3.5em}{0.18em}\par}}
+% magazine-style centered section heading inside the body
+\newcommand{\qsheading}[1]{%
+  \par\vspace{1.1em plus 0.3em}%
+  {\centering\heiti\Large\color{ecolor}#1\par}%
+  \vspace{0.55em plus 0.2em}}
 
+% ---- TOC furniture ----------------------------------------------------
+\newcommand{\qstocheader}{%
+  {\centering\Huge\heiti\bfseries 目\quad 录\par}%
+  \vspace{0.5em}%
+  {\centering\color{ecolor}\rule{0.62\textwidth}{0.14em}\par}%
+  \vspace{1.6em}}
+\newcommand{\qstoccolumn}[1]{%
+  \par\vspace{1.1em plus 0.2em}%
+  \noindent{\color{ecolor}\rule[-0.28em]{0.28em}{1.15em}}\hspace{0.55em}%
+  {\large\heiti\color{ecolor}#1}\par
+  \vspace{0.55em}}
+% dotted leader that is lighter than \dotfill
+\newcommand{\qstocdots}{%
+  \leaders\hbox to 0.62em{\hss\textcolor{qsgray}{·}\hss}\hfill}
 
-\def\bibfont{\footnotesize}
 
 \def\IfEmpty#1{%
   \edef\1{\the#1}
@@ -429,7 +485,7 @@
 \newtoks\institute
 
 \def \ifempty#1{
-  \def\temp{#1} 
+  \def\temp{#1}
   \ifx\temp\empty}
 
 \renewcommand\maketitle{\par
@@ -458,41 +514,32 @@
   \global\let\@maketitle\relax
   \global\let\@thanks\@empty
   \global\let\@author\@empty
-  \global\let\@ELEGANT@version\@empty
   \global\let\@date\@empty
   \global\let\@title\@empty
   \global\let\title\relax
   \global\let\author\relax
   \global\let\date\relax
-  \global\let\and\relax
-  \global\let\ELEGANT@version\relax}
+  \global\let\and\relax}
 
+% single-article title block: heiti headline in theme color, short red
+% rule, fangsong byline, kai source line — mirrors the issue-mode design.
 \def\@maketitle{%
-  \color{ecolor}
   \null
-  \vskip 2em%
+  \vskip 1.6em%
   \begin{center}%
-    \let \footnote \thanks{%
-      \LARGE\bfseries \@title \par}%
-    \vskip 1.5em {%
-      \large
-      \lineskip .5em%
-      \begin{tabular}[t]{c}%
-        \@author
-      \end{tabular}\\
-      \begin{tabular}[t]{c}%
-          \the\institute
-      \end{tabular}\par}%
-
-  \IfEmpty\version
-  \else 
-    {\normalfont\citshape\versiontext\the\version \\}
-  \fi
-	\ifx\@date\empty
-	\else 
-    {\normalfont\citshape\updatetext\@date}%
-  \fi
+    {\LARGE\heiti\bfseries\color{ecolor}\@title\par}%
+    \vskip 0.9em%
+    {\color{ecolor}\rule{3.5em}{0.18em}\par}%
+    \ifx\@author\@empty\else
+      \vskip 0.9em%
+      {\normalsize\fangsong\@author\par}%
+    \fi
+    \ifx\@date\@empty\else
+      \vskip 0.45em%
+      {\small\kaishu\color{qsgray}来源：\@date\par}%
+    \fi
   \end{center}%
+  \vskip 0.8em%
   \par}
 
 
@@ -524,98 +571,3 @@
 \setlist[itemize,1]{label={\eitemi}}
 \setlist[itemize,2]{label={\eitemii}}
 \setlist[itemize,3]{label={\eitemiii}}
-% source1: https://tex.stackexchange.com/questions/41408/a-five-level-deep-list
-% source2: https://tex.stackexchange.com/questions/318199/change-color-of-itemize-bullet 
-
-
-\RequirePackage{listings,lstautogobble}
-\renewcommand{\ttdefault}{cmtt}
-
-\lstdefinestyle{estyle}{
-  basicstyle=%
-    \ttfamily
-    \lst@ifdisplaystyle\small\fi}
-
-% \lstset{
-%   basicstyle=\scriptsize\ttfamily,
-%   style=estyle}
-
-\definecolor{lightgrey}{rgb}{0.9,0.9,0.9}
-\definecolor{frenchplum}{RGB}{190,20,83}
-\lstset{language=[LaTeX]TeX,
-  style=estyle,
-  autogobble=true,
-  texcsstyle=*\color{winered},
-  numbers=none,
-  breaklines=true,
-  keywordstyle=\color{winered},
-  commentstyle=\color{gray},
-  emph={%
-    elegantpaper,
-    fontenc,
-    fontspec,
-    xeCJK,
-    FiraMono,
-    xunicode,
-    newtxmath,
-    figure,
-    fig,
-    image,
-    img,
-    table,
-    itemize,
-    enumerate,
-    newtxtext,
-    newtxtt,
-    ctex,
-    microtype,
-    description,
-    times,
-    newtx,
-    booktabs,
-    tabular,
-    PDFLaTeX,
-    XeLaTeX,
-    type1cm,
-    BibTeX,
-    device,
-    color,
-    mode,
-    chinesefont,
-    cite,
-    bibstyle,
-    math,
-    lang,
-    amsthm},
-  emphstyle={\color{frenchplum}},
-  morekeywords={%
-    DeclareSymbolFont,
-    setCJKfamilyfont,
-    SetSymbolFont,
-    toprule,
-    midrule,
-    bottomrule,
-    institute,
-    version,
-    includegraphics,
-    setmainfont,
-    setsansfont,
-    setmonofont ,
-    setCJKmainfont,
-    setCJKsansfont,
-    setCJKmonofont,
-    RequirePackage,
-    figref,
-    pagecolor,
-    definecolor,
-    tabref,
-    email,
-    maketitle,
-    keywords},
-  frame=none,
-  tabsize=2}
-
-\addbibresource[location=local]{reference.bib}
-
-% restore the tt default family to lmodern tt family
-\renewcommand\ttdefault{lmtt}

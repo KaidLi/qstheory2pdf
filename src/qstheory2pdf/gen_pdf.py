@@ -101,15 +101,33 @@ class PDFGenerator:
         gen.finish()                   # removes tempdir (and all images)
     """
 
-    def __init__(self, device: str = "normal") -> None:
+    def __init__(self, device: str = "normal", font: str = "auto") -> None:
         resource_path = os.path.join(
             os.path.dirname(qstheory2pdf.__file__), "resource"
         )
         self.template_path = os.path.join(resource_path, "template.tex")
         self.cls_path = os.path.join(resource_path, "qiushi.cls")
         self.device = device
+        self.font = font  # "auto" (开源字体优先自动探测) | "wenkai" (全文楷)
         self.workdir: str | None = None
         self.image_dir: str | None = None
+
+    @property
+    def color_theme(self) -> str:
+        """Color theme for the current device.
+
+        E-ink screens dither color into muddy gray, so kindle/scribe get
+        pure black; LCD/paper devices get the red "qiushi" accent theme.
+        """
+        return "black" if self.device in ("kindle", "scribe") else "qiushi"
+
+    @property
+    def class_options(self) -> str:
+        """\\documentclass option list for qiushi.cls."""
+        opts = f"{self.device}, {self.color_theme}"
+        if self.font == "wenkai":
+            opts += ", chinesefont=wenkai"
+        return opts
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -212,7 +230,7 @@ class PDFGenerator:
             "xelatex not found. Install TeX Live: https://tug.org/texlive/"
         )
 
-    # -------------------------------------------------------------- single mode
+    # --------------------------------------------------------------- single mode
 
     def gen_single(self, info: Article, output_path: str | None = None) -> str:
         """Generate a PDF for a single article.
@@ -228,7 +246,7 @@ class PDFGenerator:
         # read & fill template
         with open(self.template_path, "r", encoding="utf-8") as f:
             tex = f.read()
-        tex = tex.replace("[normal, black]", f"[{self.device}, black]")
+        tex = tex.replace("[normal, black]", f"[{self.class_options}]")
 
         for key in ["title", "author", "volume"]:
             tex = tex.replace(f"==xx({key})xx==", _escape_latex(info.get(key, "")))
@@ -314,7 +332,7 @@ class PDFGenerator:
         lines = []
 
         # preamble
-        lines.append(rf"\documentclass[{self.device}, black]{{qiushi}}")
+        lines.append(rf"\documentclass[{self.class_options}]{{qiushi}}")
         # indentfirst/hyperref/caption and paragraph metrics are set by the
         # class; do not override them here or device-specific tuning is lost.
         lines.append(r"\hypersetup{colorlinks=true,linkcolor=black,urlcolor=black,bookmarks=true,bookmarksopen=true}")
@@ -340,18 +358,25 @@ class PDFGenerator:
             )
             lines.append(r"\end{titlepage}")
         else:
+            # magazine-style masthead: oversized red 求是, double rule,
+            # issue number and date in quiet kai
             lines.append(r"\begin{titlepage}")
             lines.append(r"\centering")
-            lines.append(r"\vspace*{3cm}")
-            lines.append(r"{\Huge\bfseries 《求是》杂志\par}")
-            lines.append(r"\vspace{0.8cm}")
+            lines.append(r"\vspace*{2.6cm}")
+            lines.append(r"{\color{ecolor}\heiti\fontsize{64}{72}\selectfont 求\hspace{0.35em}是\par}")
+            lines.append(r"\vspace{1.1cm}")
+            lines.append(r"{\color{ecolor}\rule{0.55\textwidth}{0.16em}\par}")
+            lines.append(r"\vspace{0.12cm}")
+            lines.append(r"{\color{ecolor}\rule{0.55\textwidth}{0.05em}\par}")
             vol_display = _escape_latex(issue_volume.replace("《求是》", ""))
+            lines.append(r"\vspace{1.2cm}")
             lines.append(r"{\LARGE\kaishu " + vol_display + r"\par}")
             if issue_date:
-                lines.append(r"\vspace{1.5cm}")
-                lines.append(r"{\large\kaishu " + _escape_latex(issue_date) + r"\par}")
+                lines.append(r"\vspace{0.7cm}")
+                lines.append(r"{\large\kaishu\color{qsgray} " + _escape_latex(issue_date) + r"\par}")
             lines.append(r"\vfill")
-            lines.append(r"{\footnotesize 仅供内部人员学习参考\par}")
+            lines.append(r"{\footnotesize\kaishu\color{qsgray} 仅供内部人员学习参考\par}")
+            lines.append(r"\vspace*{1.4cm}")
             lines.append(r"\end{titlepage}")
         lines.append("")
 
@@ -383,26 +408,24 @@ class PDFGenerator:
             lines.append(r"\clearpage")
             lines.append(r"\pagestyle{fancy-note}")
 
-            # centered title block (graded sizes: column < title > subtitle
-            # > author, closed off by a short rule before the body)
-            lines.append(r"\begin{center}")
-            lines.append(r"\vspace*{1em}")
+            # centered title block via class macros (qiushi.cls): 栏目 tag,
+            # heiti headline, kai subtitle, fangsong byline, short red rule
+            lines.append(r"\vspace*{0.8em}")
             safe_title = _escape_latex(title)
             if column:
-                lines.append(r"{\small\kaishu 【" + _escape_latex(column) + r"】\par}")
-                lines.append(r"\vspace{0.3em}")
-            lines.append(r"{\LARGE\bfseries " + safe_title + r"\par}")
+                lines.append(r"\qscolumn{" + _escape_latex(column) + r"}")
+                lines.append(r"\vspace{0.5em}")
+            lines.append(r"\qstitle{" + safe_title + r"}")
             if subtitle:
                 safe_sub = _escape_latex(subtitle)
-                lines.append(r"\vspace{0.4em}")
-                lines.append(r"{\large\kaishu " + safe_sub + r"\par}")
+                lines.append(r"\vspace{0.45em}")
+                lines.append(r"\qssubtitle{" + safe_sub + r"}")
+            lines.append(r"\vspace{0.8em}")
+            lines.append(r"\qstitlerule")
             if author:
                 lines.append(r"\vspace{0.8em}")
-                lines.append(r"{\kaishu " + _escape_latex(author) + r"\par}")
-            lines.append(r"\vspace{0.5em}")
-            lines.append(r"\rule{0.3\textwidth}{0.6pt}")
-            lines.append(r"\end{center}")
-            lines.append(r"\vspace{0.5em}")
+                lines.append(r"\qsauthor{" + _escape_latex(author) + r"}")
+            lines.append(r"\vspace{1.1em}")
             lines.append(r"\phantomsection")
             lines.append(rf"\label{{art:{idx}}}")
             lines.append(rf"\pdfbookmark[0]{{{safe_title}}}{{art:{idx}}}")
@@ -427,13 +450,11 @@ class PDFGenerator:
         - Page numbers right-aligned with dot leaders
         """
         result = []
-        # heading
-        result.append(r"\begin{center}")
-        result.append(r"{\LARGE\bfseries 目\quad 录}")
-        result.append(r"\end{center}")
-        result.append(r"\vspace{1.5em}")
+        # heading (rule + spacing from the class)
+        result.append(r"\qstocheader")
         result.append("")
 
+        last_column = None
         for idx, entry in enumerate(entries):
             title = _escape_latex(entry.get("title", ""))
             author = _escape_latex(entry.get("author", ""))
@@ -441,59 +462,61 @@ class PDFGenerator:
             subtitle = _escape_latex(entry.get("subtitle", ""))
             author_role = _escape_latex(entry.get("author_role", ""))
 
+            # group consecutive entries under a red column header instead of
+            # repeating the column on every line
+            if column and column != last_column:
+                result.append(r"\qstoccolumn{" + column + r"}")
+                result.append("")
+            if column:
+                last_column = column
+
             lines = []
 
-            # build the entry line: [Column│]Title[ Subtitle]
-            prefix = ""
-            if column:
-                prefix = r"{\kaishu " + column + r"}│"
+            # Real-world TOC rows can be long (long titles + institutional
+            # authors) and wrap. Standard LaTeX \@dottedtocline treatment:
+            # hang continuation lines, reserve the page-number margin via
+            # \rightskip, pull the number box back to the edge with a
+            # negative \parfillskip, and forbid a break before the number —
+            # so a wrapped row never strands its page number on its own line.
+            hang = (r"\hangindent=2em\hangafter=1"
+                    r"\rightskip=2.4em\parfillskip=-2.4em"
+                    r"\noindent\hspace*{1em}")
+            pagebox = (r"\nobreak\makebox[2.4em][r]{\color{qsgray}\pageref{art:"
+                       + str(idx) + r"}}\par")
 
             if subtitle:
-                # two-line entry: column│title → newline → subtitle /author
+                # two-line entry: title row → subtitle /author row
                 lines.append(
-                    r"\indent " + prefix
+                    r"{" + hang
                     + r"{\bfseries " + title + r"}"
-                    + r"\hfill\pageref{art:" + str(idx) + r"}"
-                    r"\\[0.1em]"
+                    + r"\qstocdots" + pagebox + r"}"
                 )
-                sub_line = r"\hspace*{3em}{\kaishu " + subtitle + r"}"
+                sub_line = (r"\vspace{-0.25em}\noindent\hspace*{2em}"
+                            r"{\small\kaishu\color{qsgray}" + subtitle + r"}")
                 if author:
-                    sub_line += " /"
+                    sub_line += r"{\small\kaishu\color{qsgray}~/~"
                     if author_role:
-                        sub_line += r"{\kaishu " + author_role + r"}"
-                    sub_line += r"{\kaishu " + author + r"}"
-                lines.append(sub_line)
+                        sub_line += author_role
+                    sub_line += author + r"}"
+                lines.append(sub_line + r"\par")
             else:
                 # single-line entry
-                line = r"\indent " + prefix + r"{\bfseries " + title + r"}"
+                line = r"{" + hang + r"{\bfseries " + title + r"}"
                 if author:
-                    line += " /"
+                    line += r"{\small\kaishu\color{qsgray}~/~"
                     if author_role:
-                        line += r"{\kaishu " + author_role + r"}"
-                    line += r"{\kaishu " + author + r"}"
-                line += r"\dotfill\pageref{art:" + str(idx) + r"}"
+                        line += author_role
+                    line += author + r"}"
+                line += r"\qstocdots" + pagebox + r"}"
                 lines.append(line)
 
             result.extend(lines)
-            result.append(r"\par\vspace{0.6em}")
+            result.append(r"\vspace{0.7em}")
             result.append("")
 
         return result
 
-    # ---------------------------------------------------------------- body gen
-
-    @staticmethod
-    def _size_cmd(px: int) -> str:
-        """Map font-size in px to a LaTeX size command."""
-        if px <= 0:
-            return ""
-        if px >= 26:
-            return r"\Huge "
-        if px >= 20:
-            return r"\LARGE "
-        if px >= 16:
-            return r"\large "
-        return ""
+    # --------------------------------------------------------------- body
 
     def _build_body(self, content: list[ContentBlock]) -> str:
         """Convert a list of content blocks into LaTeX body text.
@@ -534,9 +557,9 @@ class PDFGenerator:
         right = block.get("right", False)
         font_size = block.get("font_size", 0)
 
-        # magazine-style centered heading
+        # magazine-style centered heading (spacing + theme color from cls)
         if large and bold and center:
-            return r"\begin{center}{\heiti\Large " + text + r"}\end{center}"
+            return r"\qsheading{" + text + r"}"
 
         # font size
         sz_cmd = PDFGenerator._size_cmd(font_size or (18 if large else 0))
@@ -555,6 +578,19 @@ class PDFGenerator:
         if italic:
             return r"\indent {\kaishu " + text + r"}"
         return r"\indent " + text
+
+    @staticmethod
+    def _size_cmd(px: int) -> str:
+        """Map font-size in px to a LaTeX size command."""
+        if px <= 0:
+            return ""
+        if px >= 26:
+            return r"\Huge "
+        if px >= 20:
+            return r"\LARGE "
+        if px >= 16:
+            return r"\large "
+        return ""
 
 
 def _safe_name(name: str) -> str:
