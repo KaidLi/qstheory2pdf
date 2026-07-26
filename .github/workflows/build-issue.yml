@@ -11,22 +11,23 @@ on:
         description: 'TOC URL（留空则自动发现最新期）'
         required: false
       device:
-        description: '阅读设备预设'
+        description: '阅读设备预设（both = normal + scribe）'
         required: false
         type: choice
-        default: 'normal'
+        default: 'both'
         options:
+          - both
           - normal
+          - scribe
           - pad
           - kindle
           - screen
           - pc
-          - scribe
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: write
 
@@ -85,14 +86,26 @@ jobs:
 
       - name: Build PDF
         if: steps.check.outputs.exists == 'false'
+        env:
+          DEVICE: ${{ inputs.device || 'both' }}
+          URL: ${{ steps.discover.outputs.url }}
+          TAG: ${{ steps.discover.outputs.tag }}
         run: |
           # GitHub strips non-ASCII chars from release asset names
-          # (求是_2026_14.pdf → _2026_14.pdf), so name the file after the
-          # ASCII release tag instead.
-          uv run qstheory2pdf \
-            -d "${{ inputs.device || 'normal' }}" \
-            -o "output/${{ steps.discover.outputs.tag }}.pdf" \
-            "${{ steps.discover.outputs.url }}"
+          # (求是_2026_14.pdf → _2026_14.pdf), so name files after the
+          # ASCII release tag. normal gets the bare tag; other devices
+          # get a -<device> suffix.
+          build() {
+            local dev="$1" suffix=""
+            [ "$dev" != "normal" ] && suffix="-$dev"
+            uv run qstheory2pdf -d "$dev" -o "output/${TAG}${suffix}.pdf" "$URL"
+          }
+          if [ "$DEVICE" = "both" ]; then
+            build normal
+            build scribe
+          else
+            build "$DEVICE"
+          fi
 
       - name: Create Release
         if: steps.check.outputs.exists == 'false'
@@ -106,7 +119,7 @@ jobs:
             |---|---|
             | **期号** | ${{ steps.discover.outputs.volume }} |
             | **来源** | ${{ steps.discover.outputs.url }} |
-            | **设备** | ${{ inputs.device || 'normal' }} |
+            | **设备** | ${{ inputs.device || 'both' }}（both = normal + scribe） |
 
             由 [qstheory2pdf](https://github.com/${{ github.repository }}) 自动生成。
 
