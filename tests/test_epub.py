@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import base64
+import random
 import tempfile
 import unittest
 import zipfile
+from io import BytesIO
 from pathlib import Path
 from xml.etree import ElementTree
+
+from PIL import Image
 
 from qstheory2pdf.entry import (
     _build_parser,
@@ -37,6 +41,14 @@ def _text(text: str, **overrides: object) -> TextBlock:
     }
     block.update(overrides)  # type: ignore[typeddict-item]
     return block
+
+
+def _png(width: int, height: int) -> bytes:
+    pixels = random.Random(0).randbytes(width * height * 3)
+    image = Image.frombytes("RGB", (width, height), pixels)
+    output = BytesIO()
+    image.save(output, "PNG")
+    return output.getvalue()
 
 
 class EPUBGeneratorTest(unittest.TestCase):
@@ -89,13 +101,28 @@ class EPUBGeneratorTest(unittest.TestCase):
             chapter = archive.read(chapter_name).decode("utf-8")
             self.assertIn("测试 &amp; 标题", chapter)
             self.assertIn("甲 &lt; 乙 &amp; 丙", chapter)
+            self.assertIn("《求是》2026/15", chapter)
             self.assertIn('class="center bold"', chapter)
-            self.assertTrue(any(name.endswith("image_0000.png") for name in names))
+            self.assertTrue(any(name.endswith("image_0000.webp") for name in names))
+            css_name = next(name for name in names if name.endswith("book.css"))
+            css = archive.read(css_name).decode("utf-8")
+            self.assertIn('"Noto Serif CJK SC"', css)
+            self.assertIn('"Noto Sans CJK SC"', css)
+            self.assertIn('"LXGW WenKai"', css)
+            self.assertIn("FangSong", css)
 
     def test_gen_issue_preserves_article_order_and_cover(self) -> None:
         articles: list[Article] = [
-            {"title": "第一篇", "content": [_text("正文一")]},
-            {"title": "第二篇", "content": [_text("正文二", right=True)]},
+            {
+                "title": "第一篇",
+                "volume": "《求是》2026/15",
+                "content": [_text("正文一")],
+            },
+            {
+                "title": "第二篇",
+                "volume": "《求是》2026/15",
+                "content": [_text("正文二", right=True)],
+            },
         ]
         entries: list[TocEntry] = [
             {
@@ -139,9 +166,77 @@ class EPUBGeneratorTest(unittest.TestCase):
             ).decode("utf-8")
             self.assertIn("本刊特稿", first)
             self.assertIn("正文一", first)
+            self.assertNotIn("《求是》2026/15", first)
             self.assertIn('class="right"', second)
+            self.assertNotIn("《求是》2026/15", second)
             self.assertLess(nav.index("第一篇"), nav.index("第二篇"))
-            self.assertTrue(any(name.endswith("cover.png") for name in names))
+            cover_name = next(name for name in names if name.endswith("cover.jpg"))
+            self.assertTrue(archive.read(cover_name).startswith(b"\xff\xd8"))
+
+    def test_static_raster_is_resized_and_encoded_as_webp(self) -> None:
+        original = _png(1200, 600)
+        source = self.images / "large.png"
+        source.write_bytes(original)
+        article: Article = {
+            "title": "图片优化",
+            "content": [{"img": "large.png", "caption": ""}],
+        }
+        output = self.root / "optimized.epub"
+
+        EPUBGenerator(str(self.images)).gen_single(article, str(output))
+
+        self.assertEqual(original, source.read_bytes())
+        with zipfile.ZipFile(output) as archive:
+            image_name = next(
+                name for name in archive.namelist() if name.endswith("image_0000.webp")
+            )
+            optimized = archive.read(image_name)
+            self.assertLess(len(optimized), len(original))
+            with Image.open(BytesIO(optimized)) as image:
+                self.assertEqual("WEBP", image.format)
+                self.assertEqual((800, 400), image.size)
+            opf_name = next(
+                name for name in archive.namelist() if name.endswith(".opf")
+            )
+            self.assertIn(b'image/webp', archive.read(opf_name))
+
+    def test_svg_and_animated_gif_are_not_transcoded(self) -> None:
+        svg = (
+            b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+            b'<rect width="10" height="10"/></svg>'
+        )
+        (self.images / "vector.svg").write_bytes(svg)
+        frames = [Image.new("RGB", (2, 2), color) for color in ("red", "blue")]
+        gif_output = BytesIO()
+        frames[0].save(
+            gif_output,
+            "GIF",
+            save_all=True,
+            append_images=frames[1:],
+            duration=100,
+            loop=0,
+        )
+        gif = gif_output.getvalue()
+        (self.images / "animated.gif").write_bytes(gif)
+        article: Article = {
+            "title": "保留格式",
+            "content": [
+                {"img": "vector.svg", "caption": ""},
+                {"img": "animated.gif", "caption": ""},
+            ],
+        }
+        output = self.root / "preserved.epub"
+
+        EPUBGenerator(str(self.images)).gen_single(article, str(output))
+
+        with zipfile.ZipFile(output) as archive:
+            images = {
+                Path(name).suffix: archive.read(name)
+                for name in archive.namelist()
+                if name.startswith("EPUB/images/")
+            }
+            self.assertEqual(svg, images[".svg"])
+            self.assertEqual(gif, images[".gif"])
 
     def test_missing_image_fails_with_clear_message(self) -> None:
         article: Article = {

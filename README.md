@@ -54,11 +54,11 @@ uv run qstheory2pdf [--format pdf|epub|both] [--strict] [-d 设备] [-o 输出�
 
 | 参数 | 说明 |
 |------|------|
-| `url` | 文章页或目录页 URL（必填） |
+| `url` | 文章页、某一期目录页或年度索引页 URL（必填） |
 | `--format` | 输出格式：`pdf`（默认）、`epub` 或 `both` |
 | `-d, --device` | 阅读设备预设，默认 `normal` |
 | `-f, --font` | 字体方案：`auto`（默认，开源字体自动探测）/ `wenkai`（全文霞鹜文楷） |
-| `-o, --output` | 输出路径；`both` 时作为基础路径并分别添加 `.pdf`、`.epub` |
+| `-o, --output` | 输出路径；`both` 时作为基础路径；年度模式下作为输出目录 |
 | `-s, --single` | 强制按单篇文章模式处理（即使 URL 是目录页） |
 | `--strict` | 整期任一文章失败即终止；自动发布始终启用，避免发布残缺刊物 |
 
@@ -94,6 +94,17 @@ uv run qstheory2pdf --format epub https://www.qstheory.cn/20260415/eb2be76d239d4
 ```bash
 uv run qstheory2pdf https://www.qstheory.cn/20260415/94280df5956349b0954c44d728bb75a1/c.html
 ```
+
+全年杂志（自动识别年度索引，按期号分别生成文件）：
+
+```bash
+uv run qstheory2pdf --format both --strict -o output/2026 \
+  https://www.qstheory.cn/20251231/2d916da295774130ac2fb223fd208895/c.html
+```
+
+年度模式不会把所有文章合并成一个超大文件，而是生成
+`求是_2026_01.pdf`、`求是_2026_01.epub`、`求是_2026_02.pdf`等独立文件。
+不指定 `-o` 时仍输出到 `output/`。
 
 指定设备和输出路径：
 
@@ -141,7 +152,7 @@ uv run qstheory2pdf -f wenkai <url>
 
 ## 输出
 
-PDF 和 EPUB 默认保存到当前目录下的 `output/` 文件夹，文件名由文章标题或期号自动生成。生成完成后自动清理下载的临时图片与编译目录。
+PDF 和 EPUB 默认保存到当前目录下的 `output/` 文件夹，文件名由文章标题或期号自动生成。年度索引模式按期号分别生成文件，`-o` 表示这一批文件的输出目录。生成完成后自动清理下载的临时图片与编译目录。
 
 ## GitHub Actions 自动发布
 

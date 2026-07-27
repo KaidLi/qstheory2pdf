@@ -7,12 +7,19 @@ import mimetypes
 import os
 import re
 import uuid
+from io import BytesIO
 from pathlib import Path
 
 from ebooklib import epub
+from PIL import Image, ImageOps
 
 from qstheory2pdf.gen_pdf import _safe_name
 from qstheory2pdf.types import Article, ContentBlock, ImageBlock, TextBlock, TocEntry
+
+_EPUB_IMAGE_MAX_WIDTH = 800
+_EPUB_IMAGE_QUALITY = 75
+_EPUB_COVER_MAX_WIDTH = 1600
+_EPUB_COVER_QUALITY = 82
 
 _BOOK_CSS = """
 html {
@@ -20,13 +27,15 @@ html {
   background: #fff;
 }
 body {
-  font-family: serif;
+  font-family: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC",
+    SimSun, serif;
   line-height: 1.75;
   margin: 5%;
   text-align: justify;
 }
 h1, h2 {
-  font-family: sans-serif;
+  font-family: "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
   text-align: center;
   line-height: 1.35;
 }
@@ -50,15 +59,19 @@ p {
   color: #444;
 }
 .subtitle {
+  font-family: "LXGW WenKai", KaiTi, STKaiti, cursive;
   font-size: 1.05em;
 }
 .author {
+  font-family: FangSong, STFangsong, "FangSong GB2312", serif;
   margin-bottom: 1.8em;
 }
+.volume, figcaption {
+  font-family: "LXGW WenKai", KaiTi, STKaiti, cursive;
+}
 .column {
-  font-family: sans-serif;
+  font-family: "LXGW WenKai", KaiTi, STKaiti, cursive;
   font-size: 0.9em;
-  font-weight: bold;
 }
 .center, .right, .left, .heading {
   text-indent: 0;
@@ -72,12 +85,20 @@ p {
 .left {
   text-align: left;
 }
-.bold, .heading {
-  font-family: sans-serif;
+.bold, .heading, .hei {
+  font-family: "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
   font-weight: bold;
 }
-.italic, .kai, .fang {
-  font-style: italic;
+.italic, .kai {
+  font-family: "LXGW WenKai", KaiTi, STKaiti, cursive;
+}
+.fang {
+  font-family: FangSong, STFangsong, "FangSong GB2312", serif;
+}
+.song {
+  font-family: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC",
+    SimSun, serif;
 }
 .large {
   font-size: 1.15em;
@@ -118,7 +139,7 @@ class EPUBGenerator:
         date = info.get("date", "")
         book = self._new_book(title=title, identifier_seed=f"{title}|{volume}|{date}")
 
-        chapter = self._build_chapter(info, 1, column="")
+        chapter = self._build_chapter(info, 1, column="", show_volume=True)
         book.add_item(chapter)
         book.toc = [chapter]
         book.spine = ["nav", chapter]
@@ -158,7 +179,12 @@ class EPUBGenerator:
         for index, article in enumerate(articles, 1):
             entry = entry_by_url_title.get(article.get("title", ""), {})
             column = entry.get("column", "")
-            chapter = self._build_chapter(article, index, column=column)
+            chapter = self._build_chapter(
+                article,
+                index,
+                column=column,
+                show_volume=False,
+            )
             book.add_item(chapter)
             spine.append(chapter)
             label = article.get("title", "") or f"第 {index} 篇"
@@ -224,9 +250,9 @@ class EPUBGenerator:
         source = self.image_dir / normalized
         if not source.is_file():
             raise FileNotFoundError(f"EPUB 图片不存在: {source}")
-        extension = source.suffix.lower() or ".jpg"
+        content, extension = self._prepare_cover(source)
         href = f"images/cover{extension}"
-        self._book.set_cover(href, source.read_bytes(), create_page=False)
+        self._book.set_cover(href, content, create_page=False)
         self._image_hrefs[normalized] = href
         return href
 
@@ -236,6 +262,7 @@ class EPUBGenerator:
         index: int,
         *,
         column: str,
+        show_volume: bool,
     ) -> epub.EpubHtml:
         title = article.get("title", "") or f"第 {index} 篇"
         chapter = epub.EpubHtml(
@@ -257,7 +284,7 @@ class EPUBGenerator:
             parts.append(f'<p class="subtitle">{html.escape(subtitle)}</p>')
         if author:
             parts.append(f'<p class="author">{html.escape(author)}</p>')
-        if volume:
+        if show_volume and volume:
             parts.append(f'<p class="volume">{html.escape(volume)}</p>')
 
         for block in article.get("content", []):
@@ -329,11 +356,7 @@ class EPUBGenerator:
         if not source.is_file():
             raise FileNotFoundError(f"EPUB 图片不存在: {source}")
 
-        media_type = mimetypes.guess_type(source.name)[0]
-        if not media_type or not media_type.startswith("image/"):
-            media_type = "image/jpeg"
-        extension = mimetypes.guess_extension(media_type) or source.suffix or ".jpg"
-        extension = ".jpg" if extension == ".jpe" else extension
+        content, media_type, extension = self._prepare_content_image(source)
         stem = re.sub(r"[^a-zA-Z0-9_-]", "_", f"image_{self._image_index:04d}")
         href = f"images/{stem}{extension.lower()}"
         self._image_index += 1
@@ -342,11 +365,104 @@ class EPUBGenerator:
             uid=f"image_{self._image_index}",
             file_name=href,
             media_type=media_type,
-            content=source.read_bytes(),
+            content=content,
         )
         self._book.add_item(item)
         self._image_hrefs[normalized] = href
         return href
+
+    @staticmethod
+    def _original_image(source: Path) -> tuple[bytes, str, str]:
+        """Return the source bytes and a manifest-safe media type/extension."""
+        content = source.read_bytes()
+        media_type = mimetypes.guess_type(source.name)[0]
+        if not media_type or not media_type.startswith("image/"):
+            media_type = "image/jpeg"
+        extension = mimetypes.guess_extension(media_type) or source.suffix or ".jpg"
+        extension = ".jpg" if extension == ".jpe" else extension
+        return content, media_type, extension.lower()
+
+    @classmethod
+    def _prepare_content_image(cls, source: Path) -> tuple[bytes, str, str]:
+        """Optimize a raster image for EPUB without touching the source file.
+
+        SVG and animated GIF resources are kept intact. Other raster formats
+        are resized to the target reading width and encoded as lossy WebP.
+        If decoding fails or WebP would be larger, the original resource is
+        used as a safe fallback.
+        """
+        original, media_type, extension = cls._original_image(source)
+        if media_type == "image/svg+xml":
+            return original, media_type, extension
+
+        try:
+            with Image.open(BytesIO(original)) as opened:
+                if getattr(opened, "is_animated", False):
+                    return original, media_type, extension
+                has_alpha = "A" in opened.getbands() or (
+                    opened.mode == "P" and "transparency" in opened.info
+                )
+                image = ImageOps.exif_transpose(opened)
+                image.load()
+
+            if image.width > _EPUB_IMAGE_MAX_WIDTH:
+                height = round(image.height * _EPUB_IMAGE_MAX_WIDTH / image.width)
+                image = image.resize(
+                    (_EPUB_IMAGE_MAX_WIDTH, height),
+                    Image.Resampling.LANCZOS,
+                )
+            image = image.convert("RGBA" if has_alpha else "RGB")
+
+            output = BytesIO()
+            image.save(
+                output,
+                "WEBP",
+                quality=_EPUB_IMAGE_QUALITY,
+                method=6,
+            )
+            optimized = output.getvalue()
+        except (OSError, ValueError):
+            return original, media_type, extension
+
+        if len(optimized) >= len(original):
+            return original, media_type, extension
+        return optimized, "image/webp", ".webp"
+
+    @classmethod
+    def _prepare_cover(cls, source: Path) -> tuple[bytes, str]:
+        """Encode the EPUB cover as a broadly compatible RGB JPEG."""
+        original, _media_type, extension = cls._original_image(source)
+        try:
+            with Image.open(BytesIO(original)) as opened:
+                image = ImageOps.exif_transpose(opened)
+                image.load()
+
+            if image.width > _EPUB_COVER_MAX_WIDTH:
+                height = round(image.height * _EPUB_COVER_MAX_WIDTH / image.width)
+                image = image.resize(
+                    (_EPUB_COVER_MAX_WIDTH, height),
+                    Image.Resampling.LANCZOS,
+                )
+            if "A" in image.getbands() or (
+                image.mode == "P" and "transparency" in image.info
+            ):
+                rgba = image.convert("RGBA")
+                background = Image.new("RGB", rgba.size, "white")
+                background.paste(rgba, mask=rgba.getchannel("A"))
+                image = background
+            else:
+                image = image.convert("RGB")
+
+            output = BytesIO()
+            image.save(
+                output,
+                "JPEG",
+                quality=_EPUB_COVER_QUALITY,
+                optimize=True,
+            )
+            return output.getvalue(), ".jpg"
+        except (OSError, ValueError):
+            return original, extension
 
     @staticmethod
     def _default_output(name: str) -> str:
