@@ -36,6 +36,7 @@ _ARTICLE["content"] = [
         "left": False,
         "font_family": "",
         "font_size": 0,
+        "role": "body",
     }
 ]
 
@@ -81,6 +82,7 @@ class EntryStrictModeTest(unittest.TestCase):
 
         generated_articles = generator.gen_issue.call_args.args[0]
         self.assertEqual(1, len(generated_articles))
+        self.assertEqual(_URL, generator.gen_issue.call_args.kwargs["source_url"])
 
 
 class YearIndexModeTest(unittest.TestCase):

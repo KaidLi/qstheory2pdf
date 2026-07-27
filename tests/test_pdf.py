@@ -20,6 +20,7 @@ def _text(text: str, **overrides: object) -> TextBlock:
         "left": False,
         "font_family": "",
         "font_size": 0,
+        "role": "body",
     }
     block.update(overrides)  # type: ignore[typeddict-item]
     return block

@@ -12,6 +12,7 @@ from typing import List, Literal, TypedDict, Union
 # Font family values emitted by QiuShiCrawler._detect_formatting. Empty string
 # means "no explicit family; use body default".
 FontFamily = Literal["fang", "kai", "hei", "song", ""]
+TextRole = Literal["body", "section_heading", "salutation", "signature"]
 
 
 class TextBlock(TypedDict):
@@ -26,6 +27,7 @@ class TextBlock(TypedDict):
     left: bool  # flush left, no first-line indent (e.g. letter salutation 编辑同志：)
     font_family: FontFamily
     font_size: int  # pixels; 0 if not explicitly set
+    role: TextRole
 
 
 class ImageBlock(TypedDict):
@@ -51,6 +53,7 @@ class Article(TypedDict, total=False):
     author: str
     volume: str  # e.g. "《求是》2026/08"
     date: str  # e.g. "2026-04-15" — first day of the issue
+    url: str  # canonical source article URL
     content: List[ContentBlock]
     qrcode: str  # path to QR PNG, relative to image_dir; only in single mode
 

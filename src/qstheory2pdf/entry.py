@@ -252,6 +252,7 @@ def _generate_issue(
                 toc_entries=matched_toc,
                 cover_image=cover_img,
                 output_path=epub_output,
+                source_url=toc_url,
             )
             generated.append(("EPUB", output))
         return generated

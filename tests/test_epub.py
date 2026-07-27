@@ -38,6 +38,7 @@ def _text(text: str, **overrides: object) -> TextBlock:
         "left": False,
         "font_family": "",
         "font_size": 0,
+        "role": "body",
     }
     block.update(overrides)  # type: ignore[typeddict-item]
     return block
@@ -70,6 +71,7 @@ class EPUBGeneratorTest(unittest.TestCase):
             "author": "作者",
             "volume": "《求是》2026/15",
             "date": "2026-08-01",
+            "url": "https://example.com/article",
             "content": [
                 _text("甲 < 乙 & 丙", bold=True, center=True),
                 {"img": "figure.png", "caption": "图 & 说明"},
@@ -94,7 +96,17 @@ class EPUBGeneratorTest(unittest.TestCase):
             self.assertIn("META-INF/container.xml", names)
             ElementTree.fromstring(archive.read("META-INF/container.xml"))
             opf = next(name for name in names if name.endswith(".opf"))
-            ElementTree.fromstring(archive.read(opf))
+            opf_text = archive.read(opf).decode("utf-8")
+            ElementTree.fromstring(opf_text)
+            self.assertNotIn('<itemref idref="nav"', opf_text)
+            self.assertIn(">作者</dc:creator>", opf_text)
+            self.assertIn("<dc:date>2026-08-01</dc:date>", opf_text)
+            self.assertIn(
+                "<dc:source>https://example.com/article</dc:source>",
+                opf_text,
+            )
+            self.assertIn("<dc:subject>求是</dc:subject>", opf_text)
+            self.assertNotIn("<dc:publisher>", opf_text)
             chapter_name = next(
                 name for name in names if name.endswith("article_001.xhtml")
             )
@@ -110,6 +122,11 @@ class EPUBGeneratorTest(unittest.TestCase):
             self.assertIn('"Noto Sans CJK SC"', css)
             self.assertIn('"LXGW WenKai"', css)
             self.assertIn("FangSong", css)
+            self.assertIn("line-height: 1.65", css)
+            self.assertIn("padding: 0 0.5em", css)
+            self.assertIn("margin: 0.25em 0", css)
+            self.assertIn("break-inside: avoid", css)
+            self.assertIn("text-align: justify", css)
 
     def test_gen_issue_preserves_article_order_and_cover(self) -> None:
         articles: list[Article] = [
@@ -151,10 +168,14 @@ class EPUBGeneratorTest(unittest.TestCase):
             toc_entries=entries,
             cover_image="cover.png",
             output_path=str(output),
+            source_url="https://example.com/issue",
         )
 
         with zipfile.ZipFile(output) as archive:
             names = archive.namelist()
+            opf = archive.read(
+                next(name for name in names if name.endswith(".opf"))
+            ).decode("utf-8")
             first = archive.read(
                 next(name for name in names if name.endswith("article_001.xhtml"))
             ).decode("utf-8")
@@ -172,6 +193,105 @@ class EPUBGeneratorTest(unittest.TestCase):
             self.assertLess(nav.index("第一篇"), nav.index("第二篇"))
             cover_name = next(name for name in names if name.endswith("cover.jpg"))
             self.assertTrue(archive.read(cover_name).startswith(b"\xff\xd8"))
+            self.assertLess(
+                opf.index('<itemref idref="cover_page"'),
+                opf.index('<itemref idref="nav"'),
+            )
+            self.assertLess(
+                opf.index('<itemref idref="nav"'),
+                opf.index('<itemref idref="article_1"'),
+            )
+            self.assertIn("<dc:date>2026-08-01</dc:date>", opf)
+            self.assertIn(
+                "<dc:source>https://example.com/issue</dc:source>",
+                opf,
+            )
+            self.assertIn("<dc:subject>求是</dc:subject>", opf)
+            self.assertIn("<dc:subject>本刊特稿</dc:subject>", opf)
+            self.assertIn("收录 2 篇文章", opf)
+            self.assertNotIn("<dc:publisher>", opf)
+            cover_page = archive.read(
+                next(name for name in names if name.endswith("cover.xhtml"))
+            ).decode("utf-8")
+            self.assertIn('epub:type="cover"', cover_page)
+            self.assertIn("../styles/cover.css", cover_page)
+            self.assertIn("../images/cover-wrapper.svg", cover_page)
+            cover_svg = archive.read(
+                next(name for name in names if name.endswith("cover-wrapper.svg"))
+            ).decode("utf-8")
+            self.assertIn('viewBox="0 0 1 1"', cover_svg)
+            self.assertIn('preserveAspectRatio="xMidYMid meet"', cover_svg)
+            self.assertIn('href="cover.jpg"', cover_svg)
+            cover_css = archive.read(
+                next(name for name in names if name.endswith("cover.css"))
+            ).decode("utf-8")
+            self.assertIn("height: 100%", cover_css)
+            self.assertIn("margin: 0", cover_css)
+
+    def test_semantic_headings_use_h2_without_expanding_navigation(self) -> None:
+        article: Article = {
+            "title": "标题层级",
+            "content": [
+                _text(
+                    "一、第一节",
+                    bold=True,
+                    role="section_heading",
+                ),
+                _text(
+                    "居中小标题",
+                    bold=True,
+                    center=True,
+                    role="section_heading",
+                ),
+                _text("同志们：", bold=True, left=True, role="salutation"),
+                _text("普通粗体", bold=True),
+            ],
+        }
+        output = self.root / "headings.epub"
+
+        EPUBGenerator(str(self.images)).gen_single(article, str(output))
+
+        with zipfile.ZipFile(output) as archive:
+            chapter = archive.read(
+                next(
+                    name
+                    for name in archive.namelist()
+                    if name.endswith("article_001.xhtml")
+                )
+            ).decode("utf-8")
+            nav = archive.read(
+                next(name for name in archive.namelist() if name.endswith("nav.xhtml"))
+            ).decode("utf-8")
+
+        self.assertIn('<h2 id="section-001">一、第一节</h2>', chapter)
+        self.assertIn(
+            '<h2 id="section-002" class="center">居中小标题</h2>',
+            chapter,
+        )
+        self.assertIn('<p class="left bold">同志们：</p>', chapter)
+        self.assertIn("<p class=\"bold\">普通粗体</p>", chapter)
+        self.assertNotIn("第一节", nav)
+
+    def test_issue_without_cover_starts_at_navigation(self) -> None:
+        output = self.root / "no-cover.epub"
+        EPUBGenerator(str(self.images)).gen_issue(
+            [{"title": "无封面期刊", "content": [_text("正文")]}],
+            issue_volume="《求是》2026/15",
+            output_path=str(output),
+        )
+
+        with zipfile.ZipFile(output) as archive:
+            opf = archive.read(
+                next(
+                    name for name in archive.namelist() if name.endswith(".opf")
+                )
+            ).decode("utf-8")
+
+        self.assertNotIn('<itemref idref="cover_page"', opf)
+        self.assertLess(
+            opf.index('<itemref idref="nav"'),
+            opf.index('<itemref idref="article_1"'),
+        )
 
     def test_static_raster_is_resized_and_encoded_as_webp(self) -> None:
         original = _png(1200, 600)

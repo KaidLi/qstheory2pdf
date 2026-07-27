@@ -15,7 +15,7 @@ import qrcode
 import requests
 from lxml import etree
 
-from qstheory2pdf.types import Article, ContentBlock, TocEntry, TocResult
+from qstheory2pdf.types import Article, ContentBlock, TextRole, TocEntry, TocResult
 
 # Date pattern encoded in qstheory.cn article URLs: /YYYYMMDD/hash/c.html
 _DATE_URL_RE = re.compile(r"/(\d{4})(\d{2})(\d{2})/")
@@ -156,6 +156,34 @@ class QiuShiCrawler:
         }
 
     @staticmethod
+    def _text_role(
+        text: str,
+        *,
+        bold: bool,
+        center: bool,
+        large: bool,
+        salutation: bool,
+        signature: bool,
+    ) -> TextRole:
+        """Classify a paragraph by meaning instead of appearance alone."""
+        if salutation:
+            return "salutation"
+        if signature:
+            return "signature"
+        numbered_heading = re.match(
+            r"^(?:"
+            r"[一二三四五六七八九十百]+[、．.]"
+            r"|第[一二三四五六七八九十百\d]+[章节篇部分]"
+            r"|[（(]?[一二三四五六七八九十百]+[）)]"
+            r"|\d+[、．.]"
+            r")",
+            text,
+        )
+        if bold and (center or large or numbered_heading):
+            return "section_heading"
+        return "body"
+
+    @staticmethod
     def _extract_date_from_url(url: str) -> str:
         """Extract YYYY-MM-DD from qstheory.cn article URL."""
         m = _DATE_URL_RE.search(url)
@@ -207,7 +235,7 @@ class QiuShiCrawler:
     # ---- public API ----------------------------------------------------------
 
     def download_toc_cover(self, url: str) -> str | None:
-        """Download the first content image from the TOC page.
+        """Download the best available cover image from the TOC page.
 
         Returns the filename (relative to image_dir), or None if no suitable
         image found.
@@ -217,11 +245,32 @@ class QiuShiCrawler:
         html = etree.HTML(resp.text)
         imgs = html.xpath('//div[contains(@class,"content")]//img')
         for img in imgs:
-            src = img.get("src", "")
-            if self._is_qr_img(src):
-                continue
-            img_url = urljoin(url, src)
-            return self._download_img(img_url)
+            candidates = []
+            srcset = img.get("srcset", "")
+            if srcset:
+                parsed_srcset = []
+                for item in srcset.split(","):
+                    parts = item.strip().split()
+                    if not parts:
+                        continue
+                    descriptor = parts[1] if len(parts) > 1 else "1x"
+                    match = re.match(r"(\d+(?:\.\d+)?)(?:w|x)?$", descriptor)
+                    score = float(match.group(1)) if match else 0.0
+                    parsed_srcset.append((score, parts[0]))
+                if parsed_srcset:
+                    candidates.append(max(parsed_srcset)[1])
+            for attribute in ("data-original", "data-src", "src"):
+                value = (img.get(attribute) or "").strip()
+                if value:
+                    candidates.append(value)
+            for candidate in candidates:
+                if not self._is_qr_img(candidate):
+                    return self._download_img(urljoin(url, candidate))
+
+        for candidate in html.xpath('//meta[@property="og:image"]/@content'):
+            candidate = candidate.strip()
+            if candidate and not self._is_qr_img(candidate):
+                return self._download_img(urljoin(url, candidate))
         return None
 
     @classmethod
@@ -485,6 +534,7 @@ class QiuShiCrawler:
             "author": author,
             "volume": volume,
             "date": self._extract_date_from_url(url),
+            "url": url,
             "content": [],
         }
 
@@ -532,11 +582,22 @@ class QiuShiCrawler:
                 # letter salutation (信件抬头 "编辑同志："): short first body
                 # line ending with a full-width colon — flush left, no indent
                 is_left = fmt["left"]
-                if (first_text_block
-                        and re.fullmatch(r"[^：:，。；]{1,10}[：:]", text)):
+                is_salutation = bool(
+                    first_text_block
+                    and re.fullmatch(r"[^：:，。；]{1,10}[：:]", text)
+                )
+                if is_salutation:
                     is_left = True
 
                 if text:
+                    role = self._text_role(
+                        text,
+                        bold=fmt["bold"],
+                        center=fmt["center"],
+                        large=fmt["large"],
+                        salutation=is_salutation,
+                        signature=is_right,
+                    )
                     block: ContentBlock = {
                         "text": text,
                         "bold": fmt["bold"],
@@ -547,6 +608,7 @@ class QiuShiCrawler:
                         "left": is_left,
                         "font_family": fmt["font_family"],  # type: ignore[typeddict-item]
                         "font_size": fmt["font_size"],
+                        "role": role,
                     }
                     result["content"].append(block)
                     first_text_block = False
@@ -564,6 +626,7 @@ class QiuShiCrawler:
                             and len(norm_text) <= 30
                             and not block.get("center")):
                         block["right"] = True
+                        block["role"] = "signature"
                     break
 
         if with_qr:
