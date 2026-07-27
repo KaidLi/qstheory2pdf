@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-qstheory2pdf converts articles from 求是网 (qstheory.cn) into PDF files. The tool supports two modes:
+qstheory2pdf converts articles from 求是网 (qstheory.cn) into PDF or EPUB files. The tool supports two content modes:
 - **Single article mode**: Download one article → one PDF
 - **Issue mode**: Download all articles from a magazine issue's table of contents → single combined PDF
 
@@ -17,6 +17,7 @@ src/
     types.py           # TypedDict contracts: Article, ContentBlock, TocEntry, TocResult
     crawler.py         # Data layer: fetch/parse HTML from qstheory.cn
     gen_pdf.py         # Presentation layer: build .tex, compile via xelatex
+    gen_epub.py        # Presentation layer: build reflowable EPUB via EbookLib
     entry.py           # CLI entry point (argparse)
     resource/
       template.tex     # LaTeX template for single article
@@ -35,10 +36,11 @@ The data layer (`crawler.py`) and presentation layer (`gen_pdf.py`) communicate 
 2. **crawler.py** (`QiuShiCrawler`):
    - `fetch_toc(url) → TocResult` — one HTTP request, returns both URL list and parsed entries
    - `fetch_info(url, *, with_qr) → Article` — full article metadata + content blocks
-3. **gen_pdf.py** (`PDFGenerator`):
+3. **gen_pdf.py** (`PDFGenerator`) / **gen_epub.py** (`EPUBGenerator`):
    - `start()` — creates a tempdir, returns the image subdir path
    - `gen_single(info) / gen_issue(articles, ...)` — consume Article TypedDicts, build .tex, run xelatex
    - `finish()` — removes the tempdir (and all downloaded images)
+   - EPUB reuses the same `Article` and image directory, and does not require xelatex
 
 **Image lifecycle is explicit**: `crawler.image_dir` is set by the caller (typically `pdf_gen.start()`'s return value); the crawler writes article figures and the optional QR code into it. No shared CWD-relative state.
 
@@ -88,6 +90,9 @@ uv sync
 
 # Run the tool (via uv)
 uv run qstheory2pdf <url>
+uv run qstheory2pdf --format epub <url>
+uv run qstheory2pdf --format both <url>
+uv run qstheory2pdf --strict --format both <url>
 uv run qstheory2pdf <url> -d scribe
 uv run qstheory2pdf <url> -d scribe -o output/custom.pdf
 
@@ -127,5 +132,9 @@ PDF files are saved to the `output/` directory by default (created automatically
   - `gen_pdf._compile()` now uses `subprocess.run(..., timeout=300)` to avoid hanging runners.
   - `__version__` synced to 0.1.0; `requires-python` raised to >=3.10 (code uses PEP 604 union syntax).
 
-### Known issues (2026-06-03)
-- `fetch_info()` metadata extraction still uses `<span class="appellation">` selectors — works because the 2026 site still has them, but relies on legacy markup. Same issue as the 2026-04-29 list; not fixed in the structural refactor.
+### Robustness updates (2026-07-27)
+- Article metadata now falls back from `span.appellation`/`h1` to Open Graph, standard meta fields, and JSON-LD.
+- Downloaded image names include a URL hash, preventing same-name collisions and query-string filenames.
+- `--strict` rejects incomplete issues; the release workflow always enables it.
+- Release EPUB files must pass W3C EPUBCheck before publication.
+- Local regression coverage includes crawler, discovery, PDF rendering, EPUB packaging, CLI completeness policy, and workflow gates.

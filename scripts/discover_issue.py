@@ -32,6 +32,7 @@ NETWORK_TIMEOUT = 30
 def _fetch_tree(session: requests.Session, url: str) -> html.HtmlElement:
     """Fetch a URL with the shared QiuShiCrawler session."""
     resp = session.get(url, timeout=NETWORK_TIMEOUT)
+    resp.raise_for_status()
     resp.encoding = "utf-8"
     return html.fromstring(resp.text)
 

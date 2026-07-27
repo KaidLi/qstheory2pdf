@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qstheory2pdf"
-version = "0.1.0"
-description = "将《求是》文章转化为PDF文件"
+version = "0.2.0"
+description = "将《求是》文章转化为 PDF 或 EPUB 文件"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "GPL-3.0"}
 authors = [
     {name = "StableGenius", email = "feng@dongfa.pro"},
 ]
-keywords = ["qiushi", "qstheory", "pdf"]
+keywords = ["qiushi", "qstheory", "pdf", "epub"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
@@ -28,6 +28,7 @@ dependencies = [
     "qrcode",
     "lxml",
     "pillow>=10.4.0",
+    "ebooklib>=0.19,<1",
 ]
 
 [project.urls]
