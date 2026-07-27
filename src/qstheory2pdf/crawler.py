@@ -4,9 +4,12 @@ This module is the data-acquisition layer. It returns raw semantic data; all
 LaTeX formatting is handled by gen_pdf.py.
 """
 
+import hashlib
+import json
 import os
 import re
-from urllib.parse import urljoin
+from pathlib import PurePosixPath
+from urllib.parse import unquote, urljoin, urlsplit
 
 import qrcode
 import requests
@@ -59,10 +62,37 @@ class QiuShiCrawler:
     def _download_img(self, url: str) -> str:
         """Download image into image_dir, return filename relative to it."""
         self._ensure_img_dir()
-        fname = url.rsplit("/", 1)[-1]
+        parsed = urlsplit(url)
+        original = PurePosixPath(unquote(parsed.path)).name
+        stem, extension = os.path.splitext(original)
+        extension = extension.lower()
+        supported = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg")
+        safe_stem = re.sub(r"[^\w\u4e00-\u9fff-]", "_", stem).strip("_")
+        digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
+        prefix = f"{safe_stem or 'image'}-{digest}"
+
+        data: bytes | None = None
+        if extension not in supported:
+            for candidate in supported:
+                cached = os.path.join(self.image_dir, prefix + candidate)
+                if os.path.exists(cached):
+                    return prefix + candidate
+            response = self._get(url)
+            content_type = response.headers.get("Content-Type", "").split(";", 1)[0]
+            extension = {
+                "image/jpeg": ".jpg",
+                "image/png": ".png",
+                "image/gif": ".gif",
+                "image/webp": ".webp",
+                "image/svg+xml": ".svg",
+            }.get(content_type, ".jpg")
+            data = response.content
+
+        fname = prefix + extension
         path = os.path.join(self.image_dir, fname)
         if not os.path.exists(path):
-            data = self._get(url).content
+            if data is None:
+                data = self._get(url).content
             with open(path, "wb") as f:
                 f.write(data)
         return fname
@@ -132,6 +162,47 @@ class QiuShiCrawler:
         if not m:
             return ""
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+
+    @staticmethod
+    def _extract_json_ld_metadata(html) -> dict[str, str]:
+        """从 JSON-LD 中提取标题、作者和期号回退值。"""
+        result = {"title": "", "author": "", "volume": ""}
+        candidates: list[dict] = []
+        for raw in html.xpath('//script[@type="application/ld+json"]/text()'):
+            try:
+                value = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(value, dict):
+                graph = value.get("@graph")
+                if isinstance(graph, list):
+                    candidates.extend(item for item in graph if isinstance(item, dict))
+                candidates.append(value)
+            elif isinstance(value, list):
+                candidates.extend(item for item in value if isinstance(item, dict))
+
+        for item in candidates:
+            if not result["title"]:
+                result["title"] = str(item.get("headline") or item.get("name") or "").strip()
+            if not result["author"]:
+                author = item.get("author")
+                if isinstance(author, dict):
+                    result["author"] = str(author.get("name") or "").strip()
+                elif isinstance(author, list):
+                    names = [
+                        str(value.get("name") or "").strip()
+                        for value in author
+                        if isinstance(value, dict)
+                    ]
+                    result["author"] = "、".join(name for name in names if name)
+                elif isinstance(author, str):
+                    result["author"] = author.strip()
+            if not result["volume"]:
+                serialized = json.dumps(item, ensure_ascii=False)
+                match = re.search(r"《求是》\d{4}/\d{1,2}", serialized)
+                if match:
+                    result["volume"] = match.group(0)
+        return result
 
     # ---- public API ----------------------------------------------------------
 
@@ -339,8 +410,15 @@ class QiuShiCrawler:
         resp.encoding = "utf-8"
         html = etree.HTML(resp.text)
 
+        json_ld = self._extract_json_ld_metadata(html)
+
         # ---- title -----------------------------------------------------------
-        title = (html.xpath("//h1/text()") or [""])[0].strip()
+        title_values = (
+            html.xpath("//h1/text()")
+            or html.xpath('//meta[@property="og:title"]/@content')
+            or html.xpath('//meta[@name="title"]/@content')
+        )
+        title = (title_values or [json_ld["title"]])[0].strip()
         title = re.sub(r"\s+", " ", title)
 
         # ---- volume / author from appellation spans --------------------------
@@ -355,6 +433,21 @@ class QiuShiCrawler:
                 volume = m.group(0) if m else volume
             elif text.startswith("作者"):
                 author = text[3:]
+
+        if not author:
+            author_values = (
+                html.xpath('//meta[@name="author"]/@content')
+                or html.xpath('//meta[@property="article:author"]/@content')
+            )
+            author = (author_values or [json_ld["author"]])[0].strip()
+        if not volume:
+            description_values = (
+                html.xpath('//meta[@name="description"]/@content')
+                or html.xpath('//meta[@property="og:description"]/@content')
+            )
+            description = (description_values or [""])[0]
+            match = re.search(r"《求是》\d{4}/\d{1,2}", description)
+            volume = match.group(0) if match else json_ld["volume"]
 
         # ---- content paragraphs ----------------------------------------------
         content_ps = html.xpath(

@@ -1,4 +1,4 @@
-name: Build and Release PDF
+name: Build and Release Publications
 
 on:
   schedule:
@@ -64,8 +64,17 @@ jobs:
       - name: Sync dependencies
         run: uv sync
 
+      - name: Set up Java for EPUBCheck
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
       - name: Smoke test
-        run: uv run python -c "import qstheory2pdf; print('qstheory2pdf', qstheory2pdf.__version__)"
+        run: |
+          uv run python -m compileall -q src scripts tests
+          uv run python -m unittest discover -s tests -v
+          uv run python -c "import qstheory2pdf; print('qstheory2pdf', qstheory2pdf.__version__)"
 
       - name: Discover latest issue
         id: discover
@@ -85,60 +94,80 @@ jobs:
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.discover.outputs.tag }}
         run: |
-          if gh release view "${{ steps.discover.outputs.tag }}" &>/dev/null; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Release ${{ steps.discover.outputs.tag }} 已存在，跳过构建"
+          if ! gh release view "$TAG" &>/dev/null; then
+            echo "mode=new" >> "$GITHUB_OUTPUT"
+          elif gh release view "$TAG" --json assets --jq '.assets[].name' \
+              | grep -Fxq "${TAG}.epub"; then
+            echo "mode=skip" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG 已包含 EPUB，跳过构建"
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "mode=epub-only" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG 缺少 EPUB，将补齐附件"
           fi
 
-      - name: Build PDF
-        if: steps.check.outputs.exists == 'false'
+      - name: Build publications
+        if: steps.check.outputs.mode != 'skip'
         env:
           DEVICE: ${{ inputs.device || 'both' }}
           FONT: ${{ inputs.font || 'auto' }}
           URL: ${{ steps.discover.outputs.url }}
           TAG: ${{ steps.discover.outputs.tag }}
         run: |
-          # GitHub strips non-ASCII chars from release asset names
-          # (求是_2026_14.pdf → _2026_14.pdf), so name files after the
-          # ASCII release tag. normal gets the bare tag; other devices
-          # get a -<device> suffix.
-          build() {
+          build_pdf() {
             local dev="$1" suffix=""
             [ "$dev" != "normal" ] && suffix="-$dev"
-            uv run qstheory2pdf -d "$dev" -f "$FONT" -o "output/${TAG}${suffix}.pdf" "$URL"
+            uv run qstheory2pdf --strict -d "$dev" -f "$FONT" -o "output/${TAG}${suffix}.pdf" "$URL"
           }
-          if [ "$DEVICE" = "both" ]; then
-            build normal
-            build scribe
+          if [ "${{ steps.check.outputs.mode }}" = "epub-only" ]; then
+            uv run qstheory2pdf --strict --format epub -o "output/${TAG}.epub" "$URL"
+          elif [ "$DEVICE" = "both" ]; then
+            uv run qstheory2pdf --strict --format both -d normal -f "$FONT" -o "output/${TAG}" "$URL"
+            build_pdf scribe
           else
-            build "$DEVICE"
+            uv run qstheory2pdf --strict --format both -d "$DEVICE" -f "$FONT" -o "output/${TAG}" "$URL"
           fi
 
+      - name: Validate EPUB
+        if: steps.check.outputs.mode != 'skip'
+        env:
+          EPUBCHECK_VERSION: '5.3.0'
+        run: |
+          curl -sSL -o /tmp/epubcheck.zip \
+            "https://github.com/w3c/epubcheck/releases/download/v${EPUBCHECK_VERSION}/epubcheck-${EPUBCHECK_VERSION}.zip"
+          unzip -q /tmp/epubcheck.zip -d /tmp
+          for book in output/*.epub; do
+            java -jar "/tmp/epubcheck-${EPUBCHECK_VERSION}/epubcheck.jar" "$book"
+          done
+
       - name: Create Release
-        if: steps.check.outputs.exists == 'false'
+        if: steps.check.outputs.mode != 'skip'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.discover.outputs.tag }}
           name: 求是 ${{ steps.discover.outputs.volume }}
-          files: output/*.pdf
+          files: |
+            output/*.pdf
+            output/*.epub
           body: |
             | | |
             |---|---|
             | **期号** | ${{ steps.discover.outputs.volume }} |
             | **来源** | ${{ steps.discover.outputs.url }} |
             | **设备** | ${{ inputs.device || 'both' }}（both = normal + scribe） |
+            | **格式** | PDF + EPUB（EPUB 为墨水屏可重排版） |
 
             由 [qstheory2pdf](https://github.com/${{ github.repository }}) 自动生成。
 
-      - name: Upload PDF artifact
-        if: steps.check.outputs.exists == 'false'
+      - name: Upload publication artifacts
+        if: steps.check.outputs.mode != 'skip'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.discover.outputs.tag }}
-          path: output/*.pdf
+          path: |
+            output/*.pdf
+            output/*.epub
           retention-days: 30
 
       - name: Upload build logs on failure
