@@ -17,8 +17,9 @@ from lxml import etree
 
 from qstheory2pdf.types import Article, ContentBlock, TextRole, TocEntry, TocResult
 
-# Date pattern encoded in qstheory.cn article URLs: /YYYYMMDD/hash/c.html
-_DATE_URL_RE = re.compile(r"/(\d{4})(\d{2})(\d{2})/")
+# Date pattern historically encoded in qstheory.cn article URLs: /YYYYMMDD/hash/c.html
+# Used only as a diagnostic hint — never as an official publication date.
+_SOURCE_ID_RE = re.compile(r"/([0-9a-f]{32})/")
 
 # (connect, read) timeout for all HTTP requests — without this a stalled
 # connection hangs the CLI forever.
@@ -184,12 +185,54 @@ class QiuShiCrawler:
         return "body"
 
     @staticmethod
-    def _extract_date_from_url(url: str) -> str:
-        """Extract YYYY-MM-DD from qstheory.cn article URL."""
-        m = _DATE_URL_RE.search(url)
-        if not m:
-            return ""
-        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    def _extract_source_id(url: str) -> str:
+        """Extract the source article ID from a canonical qstheory.cn URL.
+
+        The 32-hex segment before ``/c.html`` is the stable source identity;
+        returns "" when the URL does not carry one.
+        """
+        m = _SOURCE_ID_RE.search(url)
+        return m.group(1) if m else ""
+
+    @staticmethod
+    def _extract_official_date(html) -> str:
+        """Extract an officially declared publication date (YYYY-MM-DD).
+
+        Order: ``meta name=publishdate`` (used by qstheory.cn on both TOC and
+        article pages), ``article:published_time``, ``meta name=date``, then
+        JSON-LD ``datePublished``/``dateCreated``. Returns "" when the source
+        declares no date — URL path dates are never used.
+        """
+        for xpath in (
+            '//meta[@name="publishdate"]/@content',
+            '//meta[@property="article:published_time"]/@content',
+            '//meta[@name="date"]/@content',
+        ):
+            for value in html.xpath(xpath):
+                m = re.match(r"(\d{4})-(\d{2})-(\d{2})", (value or "").strip())
+                if m:
+                    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+
+        for raw in html.xpath('//script[@type="application/ld+json"]/text()'):
+            try:
+                value = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            items: list[dict] = []
+            if isinstance(value, dict):
+                graph = value.get("@graph")
+                if isinstance(graph, list):
+                    items.extend(item for item in graph if isinstance(item, dict))
+                items.append(value)
+            elif isinstance(value, list):
+                items.extend(item for item in value if isinstance(item, dict))
+            for item in items:
+                published = item.get("datePublished") or item.get("dateCreated")
+                if isinstance(published, str):
+                    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", published.strip())
+                    if m:
+                        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+        return ""
 
     @staticmethod
     def _extract_json_ld_metadata(html) -> dict[str, str]:
@@ -312,8 +355,6 @@ class QiuShiCrawler:
             ' or (self::div and a and not(.//p) and not(.//li))]'
         )
 
-        seen_urls: set[str] = set()
-        seen_entry_urls: set[str] = set()
         urls: list[str] = []
         entries: list[TocEntry] = []
         current_column = ""
@@ -323,32 +364,36 @@ class QiuShiCrawler:
             art_hrefs = [h for h in hrefs if "/c.html" in h and h != url]
 
             if art_hrefs:
+                # Official issue entries are textual rows; image-only links
+                # (e.g. the trailing year-catalog thumbnail) are navigation,
+                # not entries.
+                block_text = b.xpath("string(.)").strip()
+                if not block_text:
+                    continue
+                # Every position is preserved (one entry per block; a block
+                # may carry several links). The same article URL may appear
+                # in several blocks — those are distinct 入刊位置 and must
+                # not be deduplicated away.
+                block_seen: set[str] = set()
                 for h in art_hrefs:
-                    if h not in seen_urls:
-                        seen_urls.add(h)
+                    if h not in block_seen:
+                        block_seen.add(h)
                         urls.append(h)
                 entry = self._parse_toc_paragraph(b, url)
-                if entry is not None and entry["url"] != url \
-                        and entry["url"] not in seen_entry_urls:
+                if entry is not None and entry["url"] != url:
                     if not entry["column"]:
                         entry["column"] = current_column
-                    seen_entry_urls.add(entry["url"])
                     entries.append(entry)
             else:
                 text = b.xpath("string(.)").strip()
                 if text and self._looks_like_column_heading(text):
                     current_column = text
 
-        # Safety net: catch article links living outside the walked block
-        # types (unknown wrappers) so no article is silently dropped —
-        # entry.py synthesizes a TOC row from the article page for these.
-        for h in html.xpath('//div[contains(@class,"content")]//a/@href'):
-            ab = urljoin(url, h)
-            if "/c.html" in ab and ab != url and ab not in seen_urls:
-                seen_urls.add(ab)
-                urls.append(ab)
-
-        return {"urls": urls, "entries": entries}
+        return {
+            "urls": urls,
+            "entries": entries,
+            "issue_date": self._extract_official_date(html),
+        }
 
     @staticmethod
     def _parse_toc_paragraph(p, base_url: str) -> TocEntry | None:
@@ -533,7 +578,8 @@ class QiuShiCrawler:
             "subtitle": subtitle,
             "author": author,
             "volume": volume,
-            "date": self._extract_date_from_url(url),
+            "date": self._extract_official_date(html),
+            "source_id": self._extract_source_id(url),
             "url": url,
             "content": [],
         }

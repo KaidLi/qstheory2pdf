@@ -52,7 +52,8 @@ class Article(TypedDict, total=False):
     subtitle: str
     author: str
     volume: str  # e.g. "《求是》2026/08"
-    date: str  # e.g. "2026-04-15" — first day of the issue
+    date: str  # e.g. "2026-04-15" — 官方声明日期（如 meta publishdate）；未声明时为空
+    source_id: str  # 来源文章标识：URL 中的 32 位十六进制段；无法取得时为空
     url: str  # canonical source article URL
     content: List[ContentBlock]
     qrcode: str  # path to QR PNG, relative to image_dir; only in single mode
@@ -72,11 +73,15 @@ class TocEntry(TypedDict):
 class TocResult(TypedDict):
     """Result of fetching a magazine issue's table of contents page.
 
-    `urls` is the flat list of article URLs (preserves order).
-    `entries` carries full metadata for each article; `entries[i].url == urls[i]`
-    when both lists are populated. `entries` may be a subset of `urls` if some
-    TOC rows lacked metadata (e.g. empty sidebar).
+    `urls` is the ordered list of article URLs in the official TOC — every
+    position is preserved, so the same URL may appear more than once (one
+    position per entry). `entries` carries full metadata for each entry;
+    `entries[i].url == urls[i]` when both lists are populated. `entries` may
+    be a subset of `urls` if some TOC rows lacked metadata.
+    `issue_date` is the officially declared publication date of the issue
+    (e.g. meta publishdate); empty when the source declares none.
     """
 
     urls: List[str]
     entries: List[TocEntry]
+    issue_date: str  # official issue publication date, "" if undeclared

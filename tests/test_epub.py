@@ -394,14 +394,17 @@ class OutputPathTest(unittest.TestCase):
 
     def test_incomplete_issue_message_lists_all_failure_types(self) -> None:
         message = _issue_completeness_error(
-            ["https://example.com/failed"],
-            ["https://example.com/empty"],
+            [
+                {"code": "download_failed", "message": "下载失败: 超时", "url": "u1"},
+                {"code": "empty_content", "message": "未提取到正文", "url": "u2"},
+                {"code": "missing_source_id", "message": "缺少来源文章标识", "url": "u3"},
+            ]
         )
-        self.assertEqual(
-            "整期内容不完整：1 篇下载失败，1 篇未提取到正文",
-            message,
-        )
-        self.assertEqual("", _issue_completeness_error([], []))
+        self.assertIn("整期内容不完整", message)
+        self.assertIn("download_failed", message)
+        self.assertIn("empty_content", message)
+        self.assertIn("missing_source_id", message)
+        self.assertEqual("", _issue_completeness_error([]))
 
 
 if __name__ == "__main__":

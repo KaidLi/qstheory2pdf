@@ -168,12 +168,14 @@ class EPUBGenerator:
         title = info.get("title", "") or "求是文章"
         volume = info.get("volume", "")
         date = info.get("date", "")
-        author = info.get("author", "") or "《求是》编辑部"
+        # 署名允许缺省；不得为缺失的作者虚构责任者。
+        author = info.get("author", "")
         description = f"{title}，来源：{volume}。" if volume else title
         book = self._new_book(
             title=title,
-            identifier_seed=f"{title}|{volume}|{date}",
-            creators=[author],
+            # 身份来自来源文章标识（URL 承载），不来自标题/日期。
+            identifier_seed=info.get("url") or title,
+            creators=[author] if author else [],
             publication_date=date,
             source_url=info.get("url", ""),
             subjects=["求是"],
@@ -210,8 +212,9 @@ class EPUBGenerator:
                 subjects.append(column)
         book = self._new_book(
             title=title,
-            identifier_seed=f"{title}|{issue_date}|{len(articles)}",
-            creators=["《求是》编辑部"],
+            # 期次身份为出版年份+期号（issue_volume 承载）；不掺入文章数或日期。
+            identifier_seed=issue_volume or title,
+            creators=[],
             publication_date=issue_date,
             source_url=source_url,
             subjects=subjects,
@@ -226,11 +229,11 @@ class EPUBGenerator:
             spine.append(cover)
         spine.append("nav")
 
-        entry_by_url_title = {
-            entry.get("title", ""): entry for entry in (toc_entries or [])
-        }
+        # 入刊条目按刊内次序与文章一一对应（与 gen_pdf 的 manual TOC 一致），
+        # 不用标题匹配身份。
+        entries_iter = iter(toc_entries or [])
         for index, article in enumerate(articles, 1):
-            entry = entry_by_url_title.get(article.get("title", ""), {})
+            entry = next(entries_iter, None) or {}
             column = entry.get("column", "")
             chapter = self._build_chapter(
                 article,

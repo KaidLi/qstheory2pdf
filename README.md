@@ -49,7 +49,7 @@ uv run qstheory2pdf --format epub https://www.qstheory.cn/20260415/eb2be76d239d4
 ## 使用方法
 
 ```
-uv run qstheory2pdf [--format pdf|epub|both] [--strict] [-d 设备] [-o 输出路径] [-s] <url>
+uv run qstheory2pdf [--format pdf|epub|both] [--allow-partial] [-d 设备] [-o 输出路径] [-s] [--status-file 路径] <url>
 ```
 
 | 参数 | 说明 |
@@ -59,8 +59,10 @@ uv run qstheory2pdf [--format pdf|epub|both] [--strict] [-d 设备] [-o 输出�
 | `-d, --device` | 阅读设备预设，默认 `normal` |
 | `-f, --font` | 字体方案：`auto`（默认，开源字体自动探测）/ `wenkai`（全文霞鹜文楷） |
 | `-o, --output` | 输出路径；`both` 时作为基础路径；年度模式下作为输出目录 |
-| `-s, --single` | 强制按单篇文章模式处理（即使 URL 是目录页） |
-| `--strict` | 整期任一文章失败即终止；自动发布始终启用，避免发布残缺刊物 |
+| `-s, --single` | 期望输入为文章页；输入期次目录或期次目录集时直接报错 |
+| `--allow-partial` | 允许生成部分重建产物：文件名追加 `-partial` 并输出警告；默认拒绝不完整重建 |
+| `--strict` | （已弃用）默认行为即为拒绝不完整重建，此参数仅作别名保留 |
+| `--status-file` | 输出机器可读的重建状态 JSON（`state`/`problems`/`outputs`） |
 
 ### 设备预设
 
@@ -118,7 +120,7 @@ uv run qstheory2pdf -d kindle -o my.pdf https://www.qstheory.cn/20260415/eb2be76
 uv run qstheory2pdf --format both -d scribe -o output/qstheory-2026-08 <url>
 ```
 
-强制单篇模式（目录页 URL 也只取当前页内容）：
+强制单篇模式（仅接受文章页；目录页会报类型冲突）：
 
 ```bash
 uv run qstheory2pdf -s https://www.qstheory.cn/20260415/94280df5956349b0954c44d728bb75a1/c.html
@@ -169,7 +171,7 @@ PDF 和 EPUB 默认保存到当前目录下的 `output/` 文件夹，文件名�
 
 **字体**：workflow 安装 Noto CJK 与霞鹜文楷，`qiushi.cls` 自动检测使用，无需任何手动切换。手动触发时可在 `font` 下拉框选 `wenkai` 生成全文楷版本。
 
-**发布门禁**：自动构建启用 `--strict`，任何文章下载或解析失败都会停止发布；EPUB 还会使用 W3C EPUBCheck 5.3.0 校验，通过后才创建 Release。
+**完整性门禁**：一篇完整文章需要来源文章标识、非空标题和至少一个实质正文块；一期完整需要官方目录中每个入刊位置都取得完整文章。部分重建（缺篇、缺图、无来源标识等）默认拒绝生成；只有显式 `--allow-partial` 才输出，且文件名带 `-partial` 标记、终端与状态文件中均有警告。自动发布（`--strict` 别名）始终要求完整重建；EPUB 还会使用 W3C EPUBCheck 5.3.0 校验，通过后才创建 Release。
 
 ## 故障排查
 

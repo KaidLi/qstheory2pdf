@@ -110,6 +110,15 @@ PDF files are saved to the `output/` directory by default (created automatically
 - **Python (>=3.10)**: requests, lxml, qrcode, pillow>=10.4.0 (managed by uv)
 - **System**: xelatex (texlive) for PDF compilation
 
+### Domain invariants (2026-08, per CONTEXT.md)
+
+- **Article identity**: `Article.source_id` = the 32-hex segment of the canonical URL; never title/content fingerprints. `Article.date` comes only from official fields (`meta name=publishdate` etc.); URL path dates are never used.
+- **Issue identity**: publication year + issue number (volume string `《求是》2026/14`); EPUB identifier and file names derive from it, never from article count or dates.
+- **Official TOC decides membership**: `fetch_toc` preserves every entry position (no URL dedup); textless/image-only rows are navigation, not entries; the ±7-day URL-date window and the safety net were removed.
+- **Issue entries associate by ordinal** (position), not by title: `gen_pdf`/`gen_epub` zip entries with articles in order.
+- **Completeness gate** (entry.py): complete article = source_id + non-empty title + ≥1 body block; complete issue = every official position complete. Partial builds are rejected by default; `--allow-partial` generates with a `-partial` filename suffix, terminal warning, and status-file marking. `--strict` is a deprecated alias of the default; `--single` rejects TOC/catalog sources.
+- **No fabricated bylines**: EPUB creators come only from real author fields.
+
 ### Resolved (2026-06-03)
 - `gen_pdf.py:34` used `qiushi2pdf.__file__` instead of `qstheory2pdf.__file__` — NameError after project rename.
 - Windows Git Bash garbled Chinese output — `sys.stdout.encoding` defaults to GBK. Fixed in `entry.py`: `sys.stdout.reconfigure(encoding="utf-8")`.

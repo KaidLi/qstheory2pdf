@@ -31,6 +31,11 @@ on:
         options:
           - auto
           - wenkai
+      dry_run:
+        description: '完整构建和验证，但不创建或更新 GitHub Release'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -96,7 +101,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.discover.outputs.tag }}
         run: |
-          if ! gh release view "$TAG" &>/dev/null; then
+          if [ "${{ inputs.dry_run || false }}" = "true" ]; then
+            echo "mode=dry-run" >> "$GITHUB_OUTPUT"
+            echo "Dry run：忽略已有 Release，执行全量构建但不发布"
+          elif ! gh release view "$TAG" &>/dev/null; then
             echo "mode=new" >> "$GITHUB_OUTPUT"
           elif gh release view "$TAG" --json assets --jq '.assets[].name' \
               | grep -Fxq "${TAG}.epub"; then
@@ -142,7 +150,7 @@ jobs:
           done
 
       - name: Create Release
-        if: steps.check.outputs.mode != 'skip'
+        if: steps.check.outputs.mode != 'skip' && inputs.dry_run != true
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.discover.outputs.tag }}
