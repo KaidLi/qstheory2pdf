@@ -17,6 +17,9 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertIn("jq -e '.state == \"complete\"'", workflow)
         self.assertNotIn("qstheory2pdf --strict", workflow)
         self.assertNotIn("--allow-partial", workflow)
+        self.assertIn("dry_run:", workflow)
+        self.assertIn('echo "mode=dry-run"', workflow)
+        self.assertIn("inputs.dry_run != true", workflow)
         self.assertIn("actions/setup-java@v5", workflow)
         self.assertIn("EPUBCHECK_VERSION: '5.3.0'", workflow)
         self.assertLess(
