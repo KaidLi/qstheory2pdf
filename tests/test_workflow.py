@@ -15,6 +15,9 @@ class WorkflowContractTest(unittest.TestCase):
         workflow = _WORKFLOW.read_text(encoding="utf-8")
 
         self.assertIn("qstheory2pdf --strict", workflow)
+        self.assertIn("dry_run:", workflow)
+        self.assertIn('echo "mode=dry-run"', workflow)
+        self.assertIn("inputs.dry_run != true", workflow)
         self.assertIn("actions/setup-java@v4", workflow)
         self.assertIn("EPUBCHECK_VERSION: '5.3.0'", workflow)
         self.assertIn('java -jar "/tmp/epubcheck-${EPUBCHECK_VERSION}/epubcheck.jar"', workflow)
