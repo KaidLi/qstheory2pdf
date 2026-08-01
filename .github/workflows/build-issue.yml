@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v9
+        uses: astral-sh/setup-uv@v9.0.0
 
       # fonts-noto-cjk: 中文主字体（生僻字全覆盖，修复 祎/頔/赟 等缺字）
       # fonts-lxgw-wenkai: 楷体（作者/图注/引文），同样全覆盖
