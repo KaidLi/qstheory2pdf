@@ -141,7 +141,9 @@ class MetadataFallbackTest(unittest.TestCase):
         crawler._get = Mock(  # type: ignore[method-assign]
             return_value=SimpleNamespace(text=page, encoding="")
         )
-        return crawler.fetch_info("https://www.qstheory.cn/20260801/hash/c.html")
+        return crawler.fetch_info(
+            "https://www.qstheory.cn/20260801/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/c.html"
+        )
 
     def test_open_graph_and_meta_fallbacks(self) -> None:
         info = self._fetch(
@@ -157,13 +159,16 @@ class MetadataFallbackTest(unittest.TestCase):
         )
 
         self.assertEqual("回退标题", info["title"])
-        self.assertEqual("回退作者", info["author"])
-        self.assertEqual("《求是》2026/15", info["volume"])
+        self.assertEqual("回退作者", info["byline"])
+        self.assertEqual("《求是》2026/15", info["issue_label"])
         self.assertEqual(
-            "https://www.qstheory.cn/20260801/hash/c.html",
-            info["url"],
+            "https://www.qstheory.cn/20260801/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/c.html",
+            info["source_url"],
         )
-        self.assertEqual("正文内容", info["content"][0]["text"])
+        self.assertEqual(
+            "正文内容",
+            "".join(run["text"] for run in info["body"][0]["runs"]),
+        )
 
     def test_json_ld_fallbacks(self) -> None:
         info = self._fetch(
@@ -184,8 +189,8 @@ class MetadataFallbackTest(unittest.TestCase):
         )
 
         self.assertEqual("结构化标题", info["title"])
-        self.assertEqual("结构化作者", info["author"])
-        self.assertEqual("《求是》2026/16", info["volume"])
+        self.assertEqual("结构化作者", info["byline"])
+        self.assertEqual("《求是》2026/16", info["issue_label"])
 
     def test_text_roles_distinguish_headings_salutations_and_signatures(self) -> None:
         info = self._fetch(
@@ -197,23 +202,27 @@ class MetadataFallbackTest(unittest.TestCase):
               <div class="content">
                 <p>测试作者</p>
                 <p><strong>同志们：</strong></p>
-                <p><strong>一、编号标题</strong></p>
+                <p style="font-weight: 700">一、编号标题</p>
+                <p>一、<strong>仅部分粗体</strong></p>
                 <p style="text-align: center"><strong>居中标题</strong></p>
                 <p style="text-align: center"><strong>一</strong></p>
                 <p><strong>普通粗体强调</strong></p>
+                <p style="text-align: right">资料来源：统计年鉴</p>
                 <p>某单位 测试作者</p>
               </div>
             </body></html>
             """
         )
 
-        blocks = [block for block in info["content"] if "text" in block]
+        blocks = [block for block in info["body"] if block["kind"] == "paragraph"]
         self.assertEqual(
             [
                 "salutation",
                 "section_heading",
+                "body",
+                "body",
                 "section_heading",
-                "section_heading",
+                "body",
                 "body",
                 "signature",
             ],

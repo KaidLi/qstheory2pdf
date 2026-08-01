@@ -1,82 +1,183 @@
-"""Typed contracts for qstheory2pdf.
+"""Domain contracts for reconstructing QiuShi publications.
 
-These TypedDicts define the schema that QiuShiCrawler emits and PDFGenerator
-consumes. They are the single source of truth for the data flow between the
-data-acquisition layer and the presentation layer.
+The types in this module mirror the ubiquitous language in ``CONTEXT.md``.
+They are deliberately JSON-friendly so reconstruction status can be emitted by
+both the CLI and CI without a second representation.
 """
 
 from __future__ import annotations
 
 from typing import List, Literal, TypedDict, Union
 
-# Font family values emitted by QiuShiCrawler._detect_formatting. Empty string
-# means "no explicit family; use body default".
-FontFamily = Literal["fang", "kai", "hei", "song", ""]
+SourceArticleId = str
+SourceDocumentKind = Literal["article", "issue_contents", "issue_catalog"]
+ReconstructionState = Literal["complete", "partial"]
 TextRole = Literal["body", "section_heading", "salutation", "signature"]
+Alignment = Literal["default", "left", "center", "right"]
 
 
-class TextBlock(TypedDict):
-    """A paragraph (or sub-paragraph) of article body text."""
+class _ReconstructionProblemRequired(TypedDict):
+    code: str
+    message: str
 
-    text: str  # raw text, no LaTeX escaping — gen_pdf.py handles that
-    bold: bool
-    italic: bool
-    center: bool
-    large: bool  # detected from font-size >= 18px
-    right: bool  # right-aligned (e.g. author attribution, letter signature)
-    left: bool  # flush left, no first-line indent (e.g. letter salutation 编辑同志：)
-    font_family: FontFamily
-    font_size: int  # pixels; 0 if not explicitly set
+
+class ReconstructionProblem(_ReconstructionProblemRequired, total=False):
+    location: str
+
+
+class ReconstructionStatus(TypedDict):
+    state: ReconstructionState
+    problems: List[ReconstructionProblem]
+
+
+class _InlineRunRequired(TypedDict):
+    text: str
+
+
+class InlineRun(_InlineRunRequired, total=False):
+    """A contiguous piece of text with semantic inline annotations."""
+
+    strong: bool
+    emphasis: bool
+    href: str
+
+
+class ParagraphBlock(TypedDict):
+    kind: Literal["paragraph"]
     role: TextRole
+    runs: List[InlineRun]
+    alignment: Alignment
+    font_family: str
+    font_size: int
 
 
-class ImageBlock(TypedDict):
-    """An image (figure) embedded in the article body."""
-
-    img: str  # path relative to image_dir, forward slashes
-    caption: str  # raw text, no LaTeX escaping
-
-
-ContentBlock = Union[TextBlock, ImageBlock]
+class ListBlock(TypedDict):
+    kind: Literal["list"]
+    ordered: bool
+    items: List[List[InlineRun]]
 
 
-class Article(TypedDict, total=False):
-    """A single article from qstheory.cn.
+class TableCell(TypedDict):
+    runs: List[InlineRun]
+    header: bool
+    rowspan: int
+    colspan: int
 
-    All fields are optional (total=False) because the crawler may not extract
-    every one from a given page; gen_pdf.py must handle missing keys gracefully
-    or surface an error.
-    """
 
+class TableBlock(TypedDict):
+    kind: Literal["table"]
+    rows: List[List[TableCell]]
+
+
+class QuoteBlock(TypedDict):
+    kind: Literal["quote"]
+    paragraphs: List[List[InlineRun]]
+
+
+class _FigureImageRequired(TypedDict):
+    src: str
+    alt: str
+
+
+class FigureImage(_FigureImageRequired, total=False):
+    source_url: str
+    missing: bool
+
+
+class FigureBlock(TypedDict):
+    kind: Literal["figure"]
+    images: List[FigureImage]
+    caption: List[InlineRun]
+
+
+class UnsupportedBlock(TypedDict):
+    kind: Literal["unsupported"]
+    source_tag: str
+    reason: str
+
+
+BodyElement = Union[
+    ParagraphBlock,
+    ListBlock,
+    TableBlock,
+    QuoteBlock,
+    FigureBlock,
+    UnsupportedBlock,
+]
+
+
+class _ArticleRequired(TypedDict):
+    source_id: SourceArticleId
+    source_url: str
     title: str
+    body: List[BodyElement]
+    reconstruction: ReconstructionStatus
+
+
+class Article(_ArticleRequired, total=False):
     subtitle: str
-    author: str
-    volume: str  # e.g. "《求是》2026/08"
-    date: str  # e.g. "2026-04-15" — first day of the issue
-    url: str  # canonical source article URL
-    content: List[ContentBlock]
-    qrcode: str  # path to QR PNG, relative to image_dir; only in single mode
+    byline: str
+    issue_label: str
+    source_publication_date: str
+    qrcode: str
 
 
-class TocEntry(TypedDict):
-    """A single row from a magazine issue's table of contents page."""
-
-    title: str
-    column: str  # 栏目, e.g. "本刊特稿"
-    subtitle: str
-    author: str
-    author_role: str  # e.g. "国家发改委副主任"
-    url: str
+class IssueId(TypedDict):
+    publication_year: int
+    issue_number: int
 
 
-class TocResult(TypedDict):
-    """Result of fetching a magazine issue's table of contents page.
+class _IssueEntryRequired(TypedDict):
+    ordinal: int
+    source_article_id: SourceArticleId
 
-    `urls` is the flat list of article URLs (preserves order).
-    `entries` carries full metadata for each article; `entries[i].url == urls[i]`
-    when both lists are populated. `entries` may be a subset of `urls` if some
-    TOC rows lacked metadata (e.g. empty sidebar).
-    """
 
-    urls: List[str]
-    entries: List[TocEntry]
+class IssueEntry(_IssueEntryRequired, total=False):
+    source_url: str
+    directory_title: str
+    directory_subtitle: str
+    directory_byline: str
+    section_label: str
+
+
+class _IssueRequired(TypedDict):
+    id: IssueId
+    source_url: str
+    entries: List[IssueEntry]
+    reconstruction: ReconstructionStatus
+
+
+class Issue(_IssueRequired, total=False):
+    publication_date: str
+
+
+class CatalogIssue(TypedDict):
+    id: IssueId
+    source_url: str
+
+
+class _IssueCatalogRequired(TypedDict):
+    source_url: str
+    issues: List[CatalogIssue]
+
+
+class IssueCatalog(_IssueCatalogRequired, total=False):
+    publication_year: int
+
+
+class ArticleDocument(TypedDict):
+    kind: Literal["article"]
+    article: Article
+
+
+class IssueContentsDocument(TypedDict):
+    kind: Literal["issue_contents"]
+    issue: Issue
+
+
+class IssueCatalogDocument(TypedDict):
+    kind: Literal["issue_catalog"]
+    catalog: IssueCatalog
+
+
+SourceDocument = Union[ArticleDocument, IssueContentsDocument, IssueCatalogDocument]

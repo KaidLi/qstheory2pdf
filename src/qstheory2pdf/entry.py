@@ -1,13 +1,14 @@
-"""CLI entry point for qstheory2pdf."""
+"""Command-line orchestration for publication reconstruction."""
+
+from __future__ import annotations
 
 import argparse
+import json
 import os
-import re
 import sys
 import tempfile
-from datetime import datetime
+from collections.abc import Mapping
 
-# Windows 终端常用 GBK；嵌入式调用中的 StringIO 则没有 reconfigure。
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
@@ -16,368 +17,421 @@ if hasattr(sys.stderr, "reconfigure"):
 import requests
 
 from qstheory2pdf import EPUBGenerator, PDFGenerator, QiuShiCrawler
-from qstheory2pdf.types import TocEntry, TocResult
-
-_YEAR_ISSUE_RE = re.compile(r"(\d{4})年第(\d+)期")
+from qstheory2pdf.crawler import SourceClassificationError
+from qstheory2pdf.domain import (
+    problem_summary,
+    reconstruction_status,
+    validate_article,
+    validate_issue,
+)
+from qstheory2pdf.types import (
+    Article,
+    CatalogIssue,
+    Issue,
+    ReconstructionProblem,
+    ReconstructionStatus,
+)
 
 
 class IssueBuildError(RuntimeError):
-    """Raised when one issue cannot be built completely enough to publish."""
+    """Raised when a requested publication cannot be reconstructed."""
 
 
-def _issue_article_urls(toc_url: str, urls: list[str]) -> list[str]:
-    """Keep links published near the issue TOC's date.
-
-    Issue pages also link back to a year index, whose URL date is months away.
-    Most article URLs share the TOC date, but some issues are assembled from
-    pages published the previous day, so exact date equality would discard
-    valid articles (observed on 2026/13). A seven-day window keeps real issue
-    content while excluding archive navigation links.
-    """
-    m = re.search(r"/(\d{8})/", toc_url)
-    if not m:
-        return urls
-    toc_date = datetime.strptime(m.group(1), "%Y%m%d")
-    result = []
-    for url in urls:
-        match = re.search(r"/(\d{8})/", url)
-        if not match:
-            continue
-        try:
-            url_date = datetime.strptime(match.group(1), "%Y%m%d")
-        except ValueError:
-            continue
-        if abs((url_date - toc_date).days) <= 7:
-            result.append(url)
-    return result
+class IncompleteReconstructionError(IssueBuildError):
+    def __init__(self, label: str, status: ReconstructionStatus) -> None:
+        super().__init__(f"{label}为部分重建：{problem_summary(status)}")
+        self.status = status
 
 
-def _year_issue_links(entries: list[TocEntry]) -> list[tuple[str, int, str]]:
-    """Extract and sort issue links from a year-index page.
-
-    Requiring at least two distinct issue numbers prevents an ordinary
-    article or issue TOC from being mistaken for a year index merely because
-    its text happens to mention one issue number.
-    """
-    issues: dict[tuple[str, int], str] = {}
-    for entry in entries:
-        match = _YEAR_ISSUE_RE.search(entry.get("title", ""))
-        url = entry.get("url", "")
-        if not match or not url:
-            continue
-        year, number = match.group(1), int(match.group(2))
-        issues[(year, number)] = url
-    if len(issues) < 2:
-        return []
-    return [
-        (year, number, issues[(year, number)])
-        for year, number in sorted(issues)
-    ]
-
-
-def _output_paths(
-    output_format: str,
-    requested: str | None,
-) -> tuple[str | None, str | None]:
-    """根据输出格式解析 PDF 与 EPUB 的目标路径。"""
+def _output_paths(output_format: str, requested: str | None) -> tuple[str | None, str | None]:
     if output_format == "pdf":
         return requested, None
     if output_format == "epub":
         return None, requested
     if requested is None:
         return None, None
-
     base, extension = os.path.splitext(requested)
     if extension.lower() in (".pdf", ".epub"):
         requested = base
     return requested + ".pdf", requested + ".epub"
 
 
+def _partial_path(path: str | None, status: ReconstructionStatus) -> str | None:
+    if path is None or status["state"] != "partial":
+        return path
+    base, extension = os.path.splitext(path)
+    if base.endswith("-partial"):
+        return path
+    return base + "-partial" + extension
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="qstheory2pdf",
-        description="将求是网文章/整期杂志转换为 PDF 或 EPUB",
-        epilog=(
-            "示例: qstheory2pdf --format epub "
-            "https://www.qstheory.cn/.../c.html"
-        ),
+        description="重建求是网文章、期次或期次目录集，并生成 PDF/EPUB",
     )
-    parser.add_argument("url", help="文章或目录页URL")
+    parser.add_argument("url", help="文章、官方期次目录或期次目录集 URL")
     parser.add_argument(
         "-d", "--device",
         choices=["normal", "pad", "kindle", "screen", "pc", "scribe"],
         default="normal",
-        help="阅读设备 (默认: normal)",
+        help="PDF 阅读设备预设",
     )
     parser.add_argument(
         "-f", "--font",
         choices=["auto", "wenkai"],
         default="auto",
-        help="字体方案: auto=开源字体自动探测(默认), wenkai=全文霞鹜文楷",
+        help="PDF 字体方案",
     )
-    parser.add_argument(
-        "-o", "--output",
-        default=None,
-        help="输出路径；both 时作为基础路径；年度索引模式下作为输出目录",
-    )
+    parser.add_argument("-o", "--output", default=None, help="输出路径；目录集模式下为输出目录")
     parser.add_argument(
         "--format",
         choices=["pdf", "epub", "both"],
         default="pdf",
-        help="输出格式: pdf（默认）、epub 或 both",
+        help="输出格式",
     )
     parser.add_argument(
         "-s", "--single",
         action="store_true",
-        help="强制按单篇文章模式处理",
+        help="声明期望输入为文章；实际类型不符时拒绝处理",
     )
-    parser.add_argument(
+    completeness = parser.add_mutually_exclusive_group()
+    completeness.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="显式允许生成醒目标记的部分重建",
+    )
+    completeness.add_argument(
         "--strict",
         action="store_true",
-        help="整期模式下任一文章下载或解析失败即终止，不生成残缺刊物",
+        help="已弃用：完整重建本来就是默认要求",
+    )
+    parser.add_argument(
+        "--status-file",
+        default=None,
+        help="写入机器可读的重建状态 JSON（供 CI 门禁使用）",
     )
     return parser
 
 
-def _issue_completeness_error(
-    failed_urls: list[str],
-    empty_urls: list[str],
-) -> str:
-    """返回整期不完整错误；完整时返回空字符串。"""
-    parts = []
-    if failed_urls:
-        parts.append(f"{len(failed_urls)} 篇下载失败")
-    if empty_urls:
-        parts.append(f"{len(empty_urls)} 篇未提取到正文")
-    if not parts:
-        return ""
-    return "整期内容不完整：" + "，".join(parts)
+def _issue_label(issue: Issue) -> str:
+    issue_id = issue.get("id", {})
+    return f"{issue_id.get('publication_year', 0)}年第{issue_id.get('issue_number', 0):02d}期"
 
 
-def _generate_issue(
-    crawler: QiuShiCrawler,
-    toc_url: str,
-    toc: TocResult,
+def _status_problem(code: str, message: str, location: str = "") -> ReconstructionProblem:
+    problem: ReconstructionProblem = {"code": code, "message": message}
+    if location:
+        problem["location"] = location
+    return problem
+
+
+def _write_status_file(
+    path: str | None,
+    status: ReconstructionStatus,
+    generated: list[tuple[str, str]],
+) -> None:
+    if not path:
+        return
+    output = os.path.abspath(path)
+    os.makedirs(os.path.dirname(output), exist_ok=True)
+    payload = {
+        "state": status["state"],
+        "problems": status["problems"],
+        "outputs": [{"format": kind.lower(), "path": value} for kind, value in generated],
+    }
+    with open(output, "w", encoding="utf-8") as stream:
+        json.dump(payload, stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
+
+
+class _BuildResources:
+    def __init__(self, args: argparse.Namespace) -> None:
+        self.args = args
+        self.pdf: PDFGenerator | None = None
+        self.temp: tempfile.TemporaryDirectory[str] | None = None
+        self.image_dir = ""
+
+    def start(self) -> None:
+        if self.args.format in ("pdf", "both"):
+            self.pdf = PDFGenerator(device=self.args.device, font=self.args.font)
+            self.image_dir = self.pdf.start()
+        else:
+            self.temp = tempfile.TemporaryDirectory(prefix="qiushi_epub_")
+            self.image_dir = os.path.join(self.temp.name, "img")
+            os.makedirs(self.image_dir, exist_ok=True)
+
+    def close(self) -> None:
+        if self.pdf is not None:
+            self.pdf.finish()
+        if self.temp is not None:
+            self.temp.cleanup()
+
+
+def _render_single(
+    article: Article,
+    status: ReconstructionStatus,
     args: argparse.Namespace,
+    resources: _BuildResources,
     pdf_output: str | None,
     epub_output: str | None,
 ) -> list[tuple[str, str]]:
-    """Download and generate one complete issue."""
-    article_urls = _issue_article_urls(toc_url, toc["urls"])
-    if len(article_urls) < 2:
-        raise IssueBuildError("目录页没有识别到足够的文章链接")
+    if status["state"] == "partial" and not args.allow_partial:
+        raise IncompleteReconstructionError("文章", status)
+    pdf_output = _partial_path(pdf_output, status)
+    epub_output = _partial_path(epub_output, status)
+    generated: list[tuple[str, str]] = []
+    if resources.pdf is not None:
+        generated.append((
+            "PDF",
+            resources.pdf.gen_single(
+                article,
+                pdf_output,
+                status=status,
+                allow_partial=args.allow_partial,
+            ),
+        ))
+    if args.format in ("epub", "both"):
+        generated.append((
+            "EPUB",
+            EPUBGenerator(resources.image_dir).gen_single(
+                article,
+                epub_output,
+                status=status,
+                allow_partial=args.allow_partial,
+            ),
+        ))
+    return generated
 
-    pdf_gen: PDFGenerator | None = None
-    temp_dir: tempfile.TemporaryDirectory[str] | None = None
-    if args.format in ("pdf", "both"):
-        pdf_gen = PDFGenerator(device=args.device, font=args.font)
-        image_dir = pdf_gen.start()
-    else:
-        temp_dir = tempfile.TemporaryDirectory(prefix="qiushi_epub_")
-        image_dir = os.path.join(temp_dir.name, "img")
-        os.makedirs(image_dir, exist_ok=True)
 
-    try:
-        crawler.image_dir = image_dir
-        entry_by_url = {e["url"]: e for e in toc["entries"]}
-        missing = [url for url in article_urls if url not in entry_by_url]
-        if missing:
-            print(f"提示: {len(missing)} 个链接缺少目录条目，将使用文章页标题")
-        print(f"整期模式: 共 {len(article_urls)} 篇文章")
+def _acquire_issue_articles(
+    crawler: QiuShiCrawler,
+    issue: Issue,
+) -> tuple[dict[str, Article], list[ReconstructionProblem]]:
+    articles: dict[str, Article] = {}
+    problems: list[ReconstructionProblem] = []
+    entries = issue.get("entries", [])
+    unique_by_id: dict[str, dict] = {}
+    for entry in entries:
+        source_id = entry.get("source_article_id", "")
+        if not source_id:
+            continue
+        existing = unique_by_id.get(source_id)
+        if existing is None or (
+            not existing.get("source_url") and entry.get("source_url")
+        ):
+            unique_by_id[source_id] = entry
+    unique_entries = list(unique_by_id.values())
 
-        articles = []
-        matched_toc = []
-        failed = []
-        empty = []
-        for i, url in enumerate(article_urls, 1):
-            print(f"  [{i}/{len(article_urls)}] 下载中...", end=" ")
-            try:
-                info = crawler.fetch_info(url, with_qr=False)
-            except requests.RequestException as error:
-                print(f"跳过 (下载失败: {error})")
-                failed.append(url)
-                continue
-            if not info.get("content"):
-                print("跳过 (无内容)")
-                empty.append(url)
-                continue
-            entry = entry_by_url.get(url) or {
-                "title": info.get("title", ""),
-                "column": "",
-                "subtitle": info.get("subtitle", ""),
-                "author": info.get("author", ""),
-                "author_role": "",
-                "url": url,
-            }
-            articles.append(info)
-            matched_toc.append(entry)
-            print(info["title"][:30])
-
-        if failed:
-            print(f"警告: {len(failed)} 篇文章下载失败，未包含在输出中")
-        if empty:
-            print(f"警告: {len(empty)} 篇文章未提取到正文，未包含在输出中")
-        completeness_error = _issue_completeness_error(failed, empty)
-        if args.strict and completeness_error:
-            raise IssueBuildError(completeness_error)
-        if not articles:
-            raise IssueBuildError("未能下载任何文章")
-
-        issue_vol = articles[0].get("volume", "")
-        issue_date = articles[0].get("date", "")
+    print(f"整期模式: {len(entries)} 个入刊条目，{len(unique_entries)} 篇唯一文章")
+    for index, entry in enumerate(unique_entries, 1):
+        source_id = entry["source_article_id"]
+        url = entry.get("source_url", "")
+        print(f"  [{index}/{len(unique_entries)}] 下载中...", end=" ")
         try:
-            cover_img = crawler.download_toc_cover(toc_url)
-        except requests.RequestException as error:
-            print(f"警告: 封面下载失败，使用默认扉页 ({error})")
-            cover_img = None
-
-        generated: list[tuple[str, str]] = []
-        if pdf_gen is not None:
-            print(f"生成 PDF ({len(articles)} 篇)...")
-            output = pdf_gen.gen_issue(
-                articles,
-                issue_volume=issue_vol,
-                issue_date=issue_date,
-                toc_entries=matched_toc,
-                cover_image=cover_img,
-                output_path=pdf_output,
+            article = crawler.fetch_info(url, with_qr=False)
+        except (requests.RequestException, SourceClassificationError, OSError) as error:
+            print(f"失败 ({error})")
+            problems.append(
+                _status_problem(
+                    "article_fetch_failed",
+                    f"文章下载或解析失败: {error}",
+                    f"article:{source_id}",
+                )
             )
-            generated.append(("PDF", output))
-        if args.format in ("epub", "both"):
-            print(f"生成 EPUB ({len(articles)} 篇)...")
-            output = EPUBGenerator(image_dir).gen_issue(
-                articles,
-                issue_volume=issue_vol,
-                issue_date=issue_date,
-                toc_entries=matched_toc,
-                cover_image=cover_img,
-                output_path=epub_output,
-                source_url=toc_url,
+            continue
+        actual_id = article.get("source_id", "")
+        if actual_id != source_id:
+            problems.append(
+                _status_problem(
+                    "article_identity_mismatch",
+                    f"目录标识 {source_id} 与文章标识 {actual_id or '缺失'} 不一致",
+                    f"article:{source_id}",
+                )
             )
-            generated.append(("EPUB", output))
-        return generated
-    finally:
-        if pdf_gen is not None:
-            pdf_gen.finish()
-        if temp_dir is not None:
-            temp_dir.cleanup()
+            print("身份不匹配，拒绝关联")
+            continue
+        articles[source_id] = article
+        print(article.get("title", source_id)[:30])
+    return articles, problems
 
 
-def _generate_single(
+def _render_issue(
     crawler: QiuShiCrawler,
+    issue: Issue,
     args: argparse.Namespace,
+    resources: _BuildResources,
     pdf_output: str | None,
     epub_output: str | None,
-) -> list[tuple[str, str]]:
-    """Generate one article in the requested format(s)."""
-    pdf_gen: PDFGenerator | None = None
-    temp_dir: tempfile.TemporaryDirectory[str] | None = None
-    if args.format in ("pdf", "both"):
-        pdf_gen = PDFGenerator(device=args.device, font=args.font)
-        image_dir = pdf_gen.start()
-    else:
-        temp_dir = tempfile.TemporaryDirectory(prefix="qiushi_epub_")
-        image_dir = os.path.join(temp_dir.name, "img")
-        os.makedirs(image_dir, exist_ok=True)
+) -> tuple[list[tuple[str, str]], ReconstructionStatus]:
+    articles, acquisition_problems = _acquire_issue_articles(crawler, issue)
+    status = validate_issue(issue, articles, acquisition_problems)
+    issue["reconstruction"] = status
+    if status["state"] == "partial" and not args.allow_partial:
+        raise IncompleteReconstructionError(_issue_label(issue), status)
 
+    cover_image: str | None = None
     try:
-        crawler.image_dir = image_dir
-        print(f"单篇文章模式: {args.url}")
-        info = crawler.fetch_info(args.url, with_qr=True)
-        if not info.get("content"):
-            raise IssueBuildError("未能提取到文章内容")
-        generated: list[tuple[str, str]] = []
-        if pdf_gen is not None:
-            generated.append(("PDF", pdf_gen.gen_single(info, pdf_output)))
-        if args.format in ("epub", "both"):
-            generated.append(
-                ("EPUB", EPUBGenerator(image_dir).gen_single(info, epub_output))
-            )
-        return generated
-    finally:
-        if pdf_gen is not None:
-            pdf_gen.finish()
-        if temp_dir is not None:
-            temp_dir.cleanup()
+        cover_image = crawler.download_toc_cover(issue.get("source_url", ""))
+    except (requests.RequestException, OSError) as error:
+        print(f"提示: 封面素材不可用，使用默认扉页 ({error})")
+
+    pdf_output = _partial_path(pdf_output, status)
+    epub_output = _partial_path(epub_output, status)
+    generated: list[tuple[str, str]] = []
+    if resources.pdf is not None:
+        generated.append((
+            "PDF",
+            resources.pdf.gen_issue(
+                issue,
+                articles,
+                cover_image=cover_image,
+                output_path=pdf_output,
+                status=status,
+                allow_partial=args.allow_partial,
+            ),
+        ))
+    if args.format in ("epub", "both"):
+        generated.append((
+            "EPUB",
+            EPUBGenerator(resources.image_dir).gen_issue(
+                issue,
+                articles,
+                cover_image=cover_image,
+                output_path=epub_output,
+                status=status,
+                allow_partial=args.allow_partial,
+            ),
+        ))
+    return generated, status
+
+
+def _catalog_output_paths(
+    args: argparse.Namespace,
+    catalog_issue: CatalogIssue,
+) -> tuple[str | None, str | None]:
+    output_dir = os.path.abspath(args.output or "output")
+    os.makedirs(output_dir, exist_ok=True)
+    issue_id = catalog_issue["id"]
+    base = os.path.join(
+        output_dir,
+        f"求是_{issue_id['publication_year']}_{issue_id['issue_number']:02d}",
+    )
+    return (
+        base + ".pdf" if args.format in ("pdf", "both") else None,
+        base + ".epub" if args.format in ("epub", "both") else None,
+    )
 
 
 def main() -> None:
-    parser = _build_parser()
-    args = parser.parse_args()
-    pdf_output, epub_output = _output_paths(args.format, args.output)
-    crawler = QiuShiCrawler()
+    args = _build_parser().parse_args()
+    if args.strict:
+        print("提示: --strict 已弃用；完整重建现在是默认行为", file=sys.stderr)
 
-    toc: TocResult | None = None
-    year_issues: list[tuple[str, int, str]] = []
-    if args.single:
-        mode = "single"
-    else:
-        toc = crawler.fetch_toc(args.url)
-        year_issues = _year_issue_links(toc["entries"])
-        if year_issues:
-            mode = "year"
-        else:
-            article_urls = _issue_article_urls(args.url, toc["urls"])
-            mode = "issue" if len(article_urls) >= 2 else "single"
-
+    resources = _BuildResources(args)
+    resources.start()
+    crawler = QiuShiCrawler(resources.image_dir)
     generated: list[tuple[str, str]] = []
+    final_status = reconstruction_status()
+    exit_error: str | None = None
+
     try:
-        if mode == "single":
-            generated = _generate_single(crawler, args, pdf_output, epub_output)
-        elif mode == "issue":
-            assert toc is not None
-            generated = _generate_issue(
-                crawler,
-                args.url,
-                toc,
+        document = crawler.fetch_document(args.url, with_qr=True)
+        if args.single and document["kind"] != "article":
+            raise IssueBuildError(
+                f"--single 期望文章，但来源类型是 {document['kind']}"
+            )
+
+        pdf_output, epub_output = _output_paths(args.format, args.output)
+        if document["kind"] == "article":
+            article = document["article"]
+            final_status = validate_article(article)
+            article["reconstruction"] = final_status
+            generated = _render_single(
+                article,
+                final_status,
                 args,
+                resources,
+                pdf_output,
+                epub_output,
+            )
+        elif document["kind"] == "issue_contents":
+            generated, final_status = _render_issue(
+                crawler,
+                document["issue"],
+                args,
+                resources,
                 pdf_output,
                 epub_output,
             )
         else:
-            output_dir = os.path.abspath(args.output or "output")
-            os.makedirs(output_dir, exist_ok=True)
-            print(f"年度索引模式: 共 {len(year_issues)} 期，输出目录: {output_dir}")
-            failed_issues = []
-            for index, (year, number, issue_url) in enumerate(year_issues, 1):
-                label = f"求是_{year}_{number:02d}"
-                print(f"\n[{index}/{len(year_issues)}] 生成 {year} 年第 {number} 期")
-                base = os.path.join(output_dir, label)
-                issue_pdf = base + ".pdf" if args.format in ("pdf", "both") else None
-                issue_epub = (
-                    base + ".epub" if args.format in ("epub", "both") else None
+            catalog = document["catalog"]
+            print(f"期次目录集: 共 {len(catalog.get('issues', []))} 期")
+            aggregate_problems: list[ReconstructionProblem] = []
+            hard_failure = False
+            for catalog_issue in catalog.get("issues", []):
+                label = (
+                    f"{catalog_issue['id']['publication_year']}年"
+                    f"第{catalog_issue['id']['issue_number']}期"
                 )
                 try:
-                    issue_toc = crawler.fetch_toc(issue_url)
-                    generated.extend(
-                        _generate_issue(
-                            crawler,
-                            issue_url,
-                            issue_toc,
-                            args,
-                            issue_pdf,
-                            issue_epub,
-                        )
+                    issue_document = crawler.fetch_document(catalog_issue["source_url"])
+                    if issue_document["kind"] != "issue_contents":
+                        raise IssueBuildError(f"{label}来源不是官方期次目录")
+                    issue = issue_document["issue"]
+                    if issue.get("id") != catalog_issue["id"]:
+                        raise IssueBuildError(f"{label}目录身份与期次目录集不一致")
+                    issue_pdf, issue_epub = _catalog_output_paths(args, catalog_issue)
+                    outputs, status = _render_issue(
+                        crawler,
+                        issue,
+                        args,
+                        resources,
+                        issue_pdf,
+                        issue_epub,
                     )
-                except (IssueBuildError, requests.RequestException) as error:
-                    print(f"错误: {year} 年第 {number} 期生成失败: {error}")
-                    failed_issues.append((year, number))
-                    if args.strict:
-                        raise IssueBuildError(
-                            f"年度生成已在第 {number} 期停止"
-                        ) from error
-
-            if failed_issues:
-                labels = "、".join(
-                    f"{year}年第{number}期" for year, number in failed_issues
-                )
-                print(f"警告: 以下期号生成失败：{labels}")
+                    generated.extend(outputs)
+                    if status["state"] == "partial":
+                        aggregate_problems.extend(status["problems"])
+                except (
+                    IssueBuildError,
+                    requests.RequestException,
+                    SourceClassificationError,
+                    OSError,
+                    ValueError,
+                ) as error:
+                    print(f"错误: {label}生成失败: {error}")
+                    hard_failure = True
+                    aggregate_problems.append(
+                        _status_problem("catalog_issue_failed", str(error), label)
+                    )
+            final_status = reconstruction_status(aggregate_problems)
+            if hard_failure or (aggregate_problems and not args.allow_partial):
+                exit_error = "期次目录集中至少一期未能完整重建"
             if not generated:
-                raise IssueBuildError("全年没有成功生成任何文件")
-    except IssueBuildError as error:
-        print(f"错误: {error}")
-        sys.exit(1)
+                exit_error = "期次目录集没有生成任何出版物"
 
+    except IncompleteReconstructionError as error:
+        final_status = error.status
+        exit_error = str(error)
+    except (
+        IssueBuildError,
+        SourceClassificationError,
+        requests.RequestException,
+        OSError,
+        ValueError,
+    ) as error:
+        final_status = reconstruction_status([
+            _status_problem("reconstruction_failed", str(error))
+        ])
+        exit_error = str(error)
+    finally:
+        resources.close()
+
+    _write_status_file(args.status_file, final_status, generated)
+    if exit_error:
+        print(f"错误: {exit_error}")
+        raise SystemExit(1)
     for kind, path in generated:
         print(f"{kind} 已生成: {path}")
     print("完成!")

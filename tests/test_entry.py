@@ -1,207 +1,154 @@
-"""CLI 整期完整性策略测试。"""
+"""CLI issue-catalog behavior tests."""
 
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-import requests
+from qstheory2pdf.crawler import SourceClassificationError
+from qstheory2pdf.domain import reconstruction_status
+from qstheory2pdf.entry import main
+from qstheory2pdf.types import Article, Issue
 
-from qstheory2pdf.entry import _issue_article_urls, _year_issue_links, main
-from qstheory2pdf.types import Article
 
-_URL = "https://www.qstheory.cn/20260801/toc/c.html"
-_ARTICLE_URLS = [
-    "https://www.qstheory.cn/20260801/one/c.html",
-    "https://www.qstheory.cn/20260801/two/c.html",
-]
-_ARTICLE: Article = {
-    "title": "完整文章",
-    "volume": "《求是》2026/15",
-    "date": "2026-08-01",
-    "content": [],
-}
-_ARTICLE["content"] = [
-    {
-        "text": "正文",
-        "bold": False,
-        "italic": False,
-        "center": False,
-        "large": False,
-        "right": False,
-        "left": False,
-        "font_family": "",
-        "font_size": 0,
-        "role": "body",
+def _article(source_id: str) -> Article:
+    return {
+        "source_id": source_id,
+        "source_url": f"https://www.qstheory.cn/20260801/{source_id}/c.html",
+        "title": f"文章 {source_id[0]}",
+        "body": [
+            {
+                "kind": "paragraph",
+                "role": "body",
+                "runs": [{"text": "正文", "strong": False, "emphasis": False}],
+                "alignment": "default",
+                "font_family": "",
+                "font_size": 0,
+            }
+        ],
+        "reconstruction": reconstruction_status(),
     }
-]
 
 
-def _crawler() -> Mock:
-    crawler = Mock()
-    crawler.fetch_toc.return_value = {"urls": _ARTICLE_URLS, "entries": []}
-    crawler.fetch_info.side_effect = [_ARTICLE, requests.Timeout("超时")]
-    crawler.download_toc_cover.return_value = None
-    return crawler
+def _issue(year: int, number: int, source_id: str, url: str) -> Issue:
+    return {
+        "id": {"publication_year": year, "issue_number": number},
+        "source_url": url,
+        "entries": [
+            {
+                "ordinal": 1,
+                "source_article_id": source_id,
+                "source_url": f"https://www.qstheory.cn/20260801/{source_id}/c.html",
+                "directory_title": f"第 {number} 期文章",
+            }
+        ],
+        "reconstruction": reconstruction_status(),
+    }
 
 
-class EntryStrictModeTest(unittest.TestCase):
-    def test_strict_mode_stops_before_generation(self) -> None:
-        crawler = _crawler()
-        with (
-            patch("qstheory2pdf.entry.QiuShiCrawler", return_value=crawler),
-            patch("qstheory2pdf.entry.EPUBGenerator") as generator,
-            patch(
-                "sys.argv",
-                ["qstheory2pdf", "--format", "epub", "--strict", _URL],
-            ),
-            redirect_stdout(io.StringIO()) as output,
-        ):
-            with self.assertRaises(SystemExit) as error:
-                main()
+def _catalog_documents():
+    first_id = "11111111111111111111111111111111"
+    second_id = "22222222222222222222222222222222"
+    issue_urls = ["https://example.com/issue-1", "https://example.com/issue-2"]
+    catalog = {
+        "kind": "issue_catalog",
+        "catalog": {
+            "source_url": "https://example.com/catalog",
+            "publication_year": 2026,
+            "issues": [
+                {"id": {"publication_year": 2026, "issue_number": 1}, "source_url": issue_urls[0]},
+                {"id": {"publication_year": 2026, "issue_number": 2}, "source_url": issue_urls[1]},
+            ],
+        },
+    }
+    issues = [
+        {"kind": "issue_contents", "issue": _issue(2026, 1, first_id, issue_urls[0])},
+        {"kind": "issue_contents", "issue": _issue(2026, 2, second_id, issue_urls[1])},
+    ]
+    return first_id, second_id, catalog, issues
 
-        self.assertEqual(1, error.exception.code)
-        self.assertIn("整期内容不完整", output.getvalue())
-        generator.assert_not_called()
 
-    def test_default_mode_generates_available_articles(self) -> None:
-        crawler = _crawler()
-        generator = Mock()
-        generator.gen_issue.return_value = "/tmp/partial.epub"
+class IssueCatalogModeTest(unittest.TestCase):
+    def _run(
+        self,
+        crawler,
+        generator,
+        output_dir: str,
+        *,
+        status_file: str | None = None,
+        allow_partial: bool = False,
+    ):
+        argv = ["qstheory2pdf", "--format", "epub", "-o", output_dir]
+        if allow_partial:
+            argv.append("--allow-partial")
+        if status_file:
+            argv.extend(["--status-file", status_file])
+        argv.append("https://example.com/catalog")
         with (
             patch("qstheory2pdf.entry.QiuShiCrawler", return_value=crawler),
             patch("qstheory2pdf.entry.EPUBGenerator", return_value=generator),
-            patch("sys.argv", ["qstheory2pdf", "--format", "epub", _URL]),
-            redirect_stdout(io.StringIO()),
+            patch("sys.argv", argv),
+            redirect_stdout(io.StringIO()) as output,
         ):
             main()
+        return output.getvalue()
 
-        generated_articles = generator.gen_issue.call_args.args[0]
-        self.assertEqual(1, len(generated_articles))
-        self.assertEqual(_URL, generator.gen_issue.call_args.kwargs["source_url"])
-
-
-class YearIndexModeTest(unittest.TestCase):
-    def test_issue_links_allow_adjacent_publication_dates(self) -> None:
-        toc_url = "https://www.qstheory.cn/20260701/toc/c.html"
-        urls = [
-            "https://www.qstheory.cn/20260701/current/c.html",
-            "https://www.qstheory.cn/20260630/previous-day/c.html",
-            "https://www.qstheory.cn/20251231/year-index/c.html",
-        ]
-
-        self.assertEqual(urls[:2], _issue_article_urls(toc_url, urls))
-
-    def test_year_issue_links_are_sorted_and_require_multiple_issues(self) -> None:
-        entries = [
-            {
-                "title": "《求是》2026年第12期",
-                "column": "",
-                "subtitle": "",
-                "author": "",
-                "author_role": "",
-                "url": "https://example.com/12",
-            },
-            {
-                "title": "《求是》2026年第2期",
-                "column": "",
-                "subtitle": "",
-                "author": "",
-                "author_role": "",
-                "url": "https://example.com/2",
-            },
-        ]
-
-        self.assertEqual(
-            [
-                ("2026", 2, "https://example.com/2"),
-                ("2026", 12, "https://example.com/12"),
-            ],
-            _year_issue_links(entries),
-        )
-        self.assertEqual([], _year_issue_links(entries[:1]))
-
-    def test_year_index_generates_one_epub_per_issue(self) -> None:
-        year_url = "https://www.qstheory.cn/20251231/year/c.html"
-        issue_urls = [
-            "https://www.qstheory.cn/20251231/issue1/c.html",
-            "https://www.qstheory.cn/20260115/issue2/c.html",
-        ]
-        year_toc = {
-            "urls": issue_urls,
-            "entries": [
-                {
-                    "title": f"《求是》2026年第{index}期",
-                    "column": "",
-                    "subtitle": "",
-                    "author": "",
-                    "author_role": "",
-                    "url": url,
-                }
-                for index, url in enumerate(issue_urls, 1)
-            ],
-        }
-        issue_tocs = [
-            {
-                "urls": [
-                    issue_urls[0].replace("issue1", f"article{index}")
-                    for index in (1, 2)
-                ],
-                "entries": [],
-            },
-            {
-                "urls": [
-                    issue_urls[1].replace("issue2", f"article{index}")
-                    for index in (1, 2)
-                ],
-                "entries": [],
-            },
-        ]
+    def test_catalog_generates_one_publication_per_issue(self) -> None:
+        first_id, second_id, catalog, issues = _catalog_documents()
         crawler = Mock()
-        crawler.fetch_toc.side_effect = [year_toc, *issue_tocs]
-        crawler.fetch_info.side_effect = [_ARTICLE] * 4
+        crawler.fetch_document.side_effect = [catalog, *issues]
+        crawler.fetch_info.side_effect = [_article(first_id), _article(second_id)]
         crawler.download_toc_cover.return_value = None
         generator = Mock()
         generator.gen_issue.side_effect = lambda *args, **kwargs: kwargs["output_path"]
 
         with tempfile.TemporaryDirectory() as output_dir:
-            with (
-                patch("qstheory2pdf.entry.QiuShiCrawler", return_value=crawler),
-                patch(
-                    "qstheory2pdf.entry.EPUBGenerator",
-                    return_value=generator,
-                ),
-                patch(
-                    "sys.argv",
-                    [
-                        "qstheory2pdf",
-                        "--format",
-                        "epub",
-                        "-o",
-                        output_dir,
-                        year_url,
-                    ],
-                ),
-                redirect_stdout(io.StringIO()) as output,
-            ):
-                main()
-
-            output_paths = [
-                call.kwargs["output_path"]
-                for call in generator.gen_issue.call_args_list
-            ]
+            output = self._run(crawler, generator, output_dir)
+            paths = [call.kwargs["output_path"] for call in generator.gen_issue.call_args_list]
             self.assertEqual(
                 [
                     str(Path(output_dir) / "求是_2026_01.epub"),
                     str(Path(output_dir) / "求是_2026_02.epub"),
                 ],
-                output_paths,
+                paths,
             )
-            self.assertIn("年度索引模式: 共 2 期", output.getvalue())
+            self.assertIn("期次目录集: 共 2 期", output)
+
+    def test_catalog_continues_after_failure_but_exits_nonzero(self) -> None:
+        first_id, second_id, catalog, issues = _catalog_documents()
+        crawler = Mock()
+        crawler.fetch_document.side_effect = [
+            catalog,
+            SourceClassificationError("期次来源失败"),
+            issues[1],
+        ]
+        crawler.fetch_info.side_effect = [_article(second_id)]
+        crawler.download_toc_cover.return_value = None
+        generator = Mock()
+        generator.gen_issue.side_effect = lambda *args, **kwargs: kwargs["output_path"]
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            status_file = str(Path(output_dir) / "status.json")
+            with self.assertRaises(SystemExit) as raised:
+                self._run(
+                    crawler,
+                    generator,
+                    output_dir,
+                    status_file=status_file,
+                    allow_partial=True,
+                )
+            self.assertEqual(1, raised.exception.code)
+            self.assertEqual(1, generator.gen_issue.call_count)
+            status = json.loads(Path(status_file).read_text(encoding="utf-8"))
+            self.assertEqual("partial", status["state"])
+            self.assertEqual(1, len(status["outputs"]))
+            self.assertIn("求是_2026_02.epub", status["outputs"][0]["path"])
+            self.assertEqual(first_id, issues[0]["issue"]["entries"][0]["source_article_id"])
 
 
 if __name__ == "__main__":

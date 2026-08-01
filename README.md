@@ -1,6 +1,8 @@
 # qstheory2pdf
 
-将求是网（qstheory.cn）文章转换为 PDF 或 EPUB，支持单篇文章和整期杂志两种模式。EPUB 为可重排版，不需要安装 LaTeX，适合墨水屏阅读器。
+从求是网（qstheory.cn）的公开来源重建《求是》文章或完整期次，并生成 PDF/EPUB 呈现版本。工具会区分文章、官方期次目录和期次目录集，默认拒绝把已知缺篇或缺少正文语义的结果冒充完整出版物。EPUB 为可重排版，不需要安装 LaTeX，适合墨水屏阅读器。
+
+领域术语、身份与完整性规则见 [`CONTEXT.md`](CONTEXT.md)。
 
 ## 准备
 
@@ -49,18 +51,20 @@ uv run qstheory2pdf --format epub https://www.qstheory.cn/20260415/eb2be76d239d4
 ## 使用方法
 
 ```
-uv run qstheory2pdf [--format pdf|epub|both] [--strict] [-d 设备] [-o 输出路径] [-s] <url>
+uv run qstheory2pdf [--format pdf|epub|both] [--allow-partial] [-d 设备] [-o 输出路径] [-s] <url>
 ```
 
 | 参数 | 说明 |
 |------|------|
-| `url` | 文章页、某一期目录页或年度索引页 URL（必填） |
+| `url` | 文章、官方期次目录或期次目录集的来源 URL（必填） |
 | `--format` | 输出格式：`pdf`（默认）、`epub` 或 `both` |
 | `-d, --device` | 阅读设备预设，默认 `normal` |
 | `-f, --font` | 字体方案：`auto`（默认，开源字体自动探测）/ `wenkai`（全文霞鹜文楷） |
-| `-o, --output` | 输出路径；`both` 时作为基础路径；年度模式下作为输出目录 |
-| `-s, --single` | 强制按单篇文章模式处理（即使 URL 是目录页） |
-| `--strict` | 整期任一文章失败即终止；自动发布始终启用，避免发布残缺刊物 |
+| `-o, --output` | 输出路径；`both` 时作为基础路径；目录集模式下作为输出目录 |
+| `-s, --single` | 声明期望输入为文章；若来源实际是期次目录或期次目录集则报错 |
+| `--allow-partial` | 显式允许部分重建；文件名追加 `-partial`，内容中醒目标示缺失原因 |
+| `--strict` | 已弃用的兼容别名；完整重建现在本来就是默认要求 |
+| `--status-file` | 写入机器可读的完整性状态 JSON，供 CI 或外部工具检查 |
 
 ### 设备预设
 
@@ -95,14 +99,14 @@ uv run qstheory2pdf --format epub https://www.qstheory.cn/20260415/eb2be76d239d4
 uv run qstheory2pdf https://www.qstheory.cn/20260415/94280df5956349b0954c44d728bb75a1/c.html
 ```
 
-全年杂志（自动识别年度索引，按期号分别生成文件）：
+期次目录集（自动识别年度目录，按期号分别生成独立文件）：
 
 ```bash
-uv run qstheory2pdf --format both --strict -o output/2026 \
+uv run qstheory2pdf --format both -o output/2026 \
   https://www.qstheory.cn/20251231/2d916da295774130ac2fb223fd208895/c.html
 ```
 
-年度模式不会把所有文章合并成一个超大文件，而是生成
+目录集模式不会把各期合并成“全年合刊”，而是生成
 `求是_2026_01.pdf`、`求是_2026_01.epub`、`求是_2026_02.pdf`等独立文件。
 不指定 `-o` 时仍输出到 `output/`。
 
@@ -118,11 +122,19 @@ uv run qstheory2pdf -d kindle -o my.pdf https://www.qstheory.cn/20260415/eb2be76
 uv run qstheory2pdf --format both -d scribe -o output/qstheory-2026-08 <url>
 ```
 
-强制单篇模式（目录页 URL 也只取当前页内容）：
+声明输入必须是单篇文章（误传目录页时立即报错）：
 
 ```bash
-uv run qstheory2pdf -s https://www.qstheory.cn/20260415/94280df5956349b0954c44d728bb75a1/c.html
+uv run qstheory2pdf -s https://www.qstheory.cn/20260415/eb2be76d239d4fa4a0ef3a9a9d82b970/c.html
 ```
+
+只有在预览或诊断时才应显式允许部分重建：
+
+```bash
+uv run qstheory2pdf --allow-partial --format epub <url>
+```
+
+部分产物会使用 `-partial` 后缀，并在扉页及缺失位置标明原因；自动发布不会使用该选项。
 
 ## 字体（三端一致的开源方案）
 
@@ -154,22 +166,24 @@ uv run qstheory2pdf -f wenkai <url>
 
 PDF 和 EPUB 默认保存到当前目录下的 `output/` 文件夹，文件名由文章标题或期号自动生成。年度索引模式按期号分别生成文件，`-o` 表示这一批文件的输出目录。生成完成后自动清理下载的临时图片与编译目录。
 
-## GitHub Actions 自动发布
+## GitHub Actions CI 与自动发布
 
-项目配置了 GitHub Actions，每月 1 日和 16 日自动发现并构建最新一期《求是》的 PDF 与 EPUB，发布到 [Releases](https://github.com/KaidLi/qstheory2pdf/releases)。因此本地没有 LaTeX 也不影响 PDF 发布。
+普通 push、Pull Request 和手动触发会运行独立的 _CI_ workflow：在 Python 3.10/3.12 上执行完整测试，并用 XeLaTeX 与 EPUBCheck 构建、校验确定性的 PDF/EPUB 冒烟产物。该 workflow 只有仓库只读权限，不会创建 Release。
+
+发布 workflow 每月 1 日和 16 日自动发现并构建最新一期《求是》的 PDF 与 EPUB，发布到 [Releases](https://github.com/KaidLi/qstheory2pdf/releases)。因此本地没有 LaTeX 也不影响 PDF 发布。
 
 **手动触发**：在 Actions 页面选择 _Build and Release Publications_ → _Run workflow_，可选填 TOC URL 和设备类型。
 
 **工作原理**：
 
-1. 定时触发（或手动）→ 从 [全年目录页](https://www.qstheory.cn/qs/mulu.htm) 自动发现最新期 URL
+1. 定时触发（或手动）→ 从 [官方期次目录入口](https://www.qstheory.cn/qs/mulu.htm) 自动发现最新期 URL
 2. 检查该期是否已发布过 Release（按 tag `qstheory-2026-08` 去重）
 3. 未发布 → 构建 PDF 与 EPUB → 发布 Release 并上传附件
 4. 已发布但缺少 EPUB → 自动补齐 EPUB；两种格式齐全则跳过
 
 **字体**：workflow 安装 Noto CJK 与霞鹜文楷，`qiushi.cls` 自动检测使用，无需任何手动切换。手动触发时可在 `font` 下拉框选 `wenkai` 生成全文楷版本。
 
-**发布门禁**：自动构建启用 `--strict`，任何文章下载或解析失败都会停止发布；EPUB 还会使用 W3C EPUBCheck 5.3.0 校验，通过后才创建 Release。
+**发布门禁**：自动构建要求 CLI 写出的 `reconstruction-*.json` 状态为 `complete`，不允许 `--allow-partial`；EPUB 还会使用 W3C EPUBCheck 5.3.0 校验。只有领域完整性与文件格式校验都通过后才创建 Release。
 
 ## 故障排查
 

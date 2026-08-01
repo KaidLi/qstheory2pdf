@@ -14,8 +14,9 @@ qstheory2pdf converts articles from 求是网 (qstheory.cn) into PDF or EPUB fil
 src/
   qstheory2pdf/
     __init__.py        # Re-exports QiuShiCrawler, PDFGenerator; declares __version__
-    types.py           # TypedDict contracts: Article, ContentBlock, TocEntry, TocResult
-    crawler.py         # Data layer: fetch/parse HTML from qstheory.cn
+    types.py           # Domain contracts: source documents, Article, Issue, IssueEntry, semantic body unions
+    crawler.py         # Data layer: classify/fetch/parse HTML from qstheory.cn
+    domain.py          # Completeness invariants and reconstruction diagnostics
     gen_pdf.py         # Presentation layer: build .tex, compile via xelatex
     gen_epub.py        # Presentation layer: build reflowable EPUB via EbookLib
     entry.py           # CLI entry point (argparse)
@@ -32,15 +33,19 @@ scripts/
 
 The data layer (`crawler.py`) and presentation layer (`gen_pdf.py`) communicate through TypedDicts defined in `types.py`. This is the single source of truth for the schema; mypy/Pyright will catch drift.
 
-1. **entry.py** receives a URL (TOC or single article)
+1. **entry.py** receives a URL and requests one semantic source document.
 2. **crawler.py** (`QiuShiCrawler`):
-   - `fetch_toc(url) → TocResult` — one HTTP request, returns both URL list and parsed entries
-   - `fetch_info(url, *, with_qr) → Article` — full article metadata + content blocks
-3. **gen_pdf.py** (`PDFGenerator`) / **gen_epub.py** (`EPUBGenerator`):
-   - `start()` — creates a tempdir, returns the image subdir path
-   - `gen_single(info) / gen_issue(articles, ...)` — consume Article TypedDicts, build .tex, run xelatex
-   - `finish()` — removes the tempdir (and all downloaded images)
-   - EPUB reuses the same `Article` and image directory, and does not require xelatex
+   - `fetch_document(url) → SourceDocument` — one request, classifies `article | issue_contents | issue_catalog` from source semantics.
+   - `fetch_info(url, *, with_qr) → Article` — compatibility method for a source that must classify as an article.
+   - Body extraction preserves semantic roles, inline emphasis/editorial links, lists, tables, quotes and multi-image figures; unsupported substantive structures make reconstruction partial.
+3. **domain.py** validates article/issue completeness before rendering.
+4. **gen_pdf.py** (`PDFGenerator`) / **gen_epub.py** (`EPUBGenerator`):
+   - `start()` — creates a tempdir, returns the image subdir path.
+   - `gen_single(article) / gen_issue(issue, articles, ...)` consume the domain model.
+   - `finish()` — removes the tempdir (and all downloaded images).
+   - EPUB reuses the same `Article` and image directory, and does not require xelatex.
+
+`CONTEXT.md` is authoritative for domain terms and completeness rules. Complete reconstruction is the default; `--allow-partial` is the explicit, visibly marked exception.
 
 **Image lifecycle is explicit**: `crawler.image_dir` is set by the caller (typically `pdf_gen.start()`'s return value); the crawler writes article figures and the optional QR code into it. No shared CWD-relative state.
 
@@ -64,7 +69,7 @@ Code targets the current (2026) website. Key extraction points:
 - Article links in TOC: `//div[contains(@class,'content')]//p[.//a]` (must use `p[.//a]`, not `p[a]` — some links are nested inside `<span>`)
 - Content paragraphs: `//div[contains(@class,"content")]//p`, skip preamble via body_start detection
 - Images: `<img>` inside `<p>`, QR images contain `zxcode` in src
-- URL pattern: `https://www.qstheory.cn/YYYYMMDD/{32-char-hash}/c.html` — the date is extracted from the URL via `_extract_date_from_url()`, not from the appellation text
+- URL pattern: `https://www.qstheory.cn/YYYYMMDD/{32-char-hash}/c.html` — the 32-character hash is the source article identifier. URL path dates are not publication dates; dates are accepted only from explicit official page fields.
 
 Detailed XPath reference in memory: `reference_new_website_structure.md`.
 
@@ -92,7 +97,7 @@ uv sync
 uv run qstheory2pdf <url>
 uv run qstheory2pdf --format epub <url>
 uv run qstheory2pdf --format both <url>
-uv run qstheory2pdf --strict --format both <url>
+uv run qstheory2pdf --allow-partial --format both <url>  # diagnostics/previews only
 uv run qstheory2pdf <url> -d scribe
 uv run qstheory2pdf <url> -d scribe -o output/custom.pdf
 
@@ -135,6 +140,7 @@ PDF files are saved to the `output/` directory by default (created automatically
 ### Robustness updates (2026-07-27)
 - Article metadata now falls back from `span.appellation`/`h1` to Open Graph, standard meta fields, and JSON-LD.
 - Downloaded image names include a URL hash, preventing same-name collisions and query-string filenames.
-- `--strict` rejects incomplete issues; the release workflow always enables it.
+- Complete reconstruction is required by default; `--allow-partial` is explicit and marked. `--strict` remains one minor version as a deprecated alias for the default.
+- The release workflow checks the CLI's machine-readable reconstruction status before publishing.
 - Release EPUB files must pass W3C EPUBCheck before publication.
 - Local regression coverage includes crawler, discovery, PDF rendering, EPUB packaging, CLI completeness policy, and workflow gates.

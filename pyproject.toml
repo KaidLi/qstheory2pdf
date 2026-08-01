@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qstheory2pdf"
-version = "0.2.0"
-description = "将《求是》文章转化为 PDF 或 EPUB 文件"
+version = "0.3.0"
+description = "从求是网重建文章或完整期次并生成 PDF/EPUB"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "GPL-3.0"}

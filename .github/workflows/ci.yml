@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: Unit tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.12']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync dependencies
+        run: uv sync --frozen --python "${{ matrix.python-version }}"
+
+      - name: Compile and test
+        run: |
+          uv run --python "${{ matrix.python-version }}" python -m compileall -q src scripts tests
+          uv run --python "${{ matrix.python-version }}" python -m unittest discover -s tests -v
+
+      - name: Verify package build
+        run: uv build
+
+  rendition-smoke:
+    name: PDF and EPUB smoke test
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install TeX Live and fonts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            texlive-xetex \
+            texlive-latex-recommended \
+            texlive-latex-extra \
+            texlive-fonts-recommended \
+            texlive-lang-chinese \
+            fonts-noto-cjk \
+            fonts-lxgw-wenkai \
+            poppler-utils
+
+      - name: Set up Java for EPUBCheck
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Sync dependencies
+        run: uv sync --frozen --python '3.12'
+
+      - name: Build deterministic renditions
+        run: uv run python scripts/smoke_renditions.py --output-dir output/ci-smoke
+
+      - name: Inspect PDF
+        run: pdfinfo output/ci-smoke/rendition-smoke.pdf
+
+      - name: Validate EPUB
+        env:
+          EPUBCHECK_VERSION: '5.3.0'
+        run: |
+          curl -sSL -o /tmp/epubcheck.zip \
+            "https://github.com/w3c/epubcheck/releases/download/v${EPUBCHECK_VERSION}/epubcheck-${EPUBCHECK_VERSION}.zip"
+          unzip -q /tmp/epubcheck.zip -d /tmp
+          java -jar "/tmp/epubcheck-${EPUBCHECK_VERSION}/epubcheck.jar" \
+            output/ci-smoke/rendition-smoke.epub
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rendition-smoke
+          path: output/ci-smoke/
+          if-no-files-found: warn

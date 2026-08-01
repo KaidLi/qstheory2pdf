@@ -1,13 +1,17 @@
-"""Crawl article info from qstheory.cn (2026 redesign).
+"""Acquire and interpret qstheory.cn source documents.
 
-This module is the data-acquisition layer. It returns raw semantic data; all
-LaTeX formatting is handled by gen_pdf.py.
+The crawler emits domain data from :mod:`qstheory2pdf.types`; it never emits
+LaTeX/EPUB fragments.  Source-document kind, publication identity, and
+completeness diagnostics are established here from source semantics.
 """
+
+from __future__ import annotations
 
 import hashlib
 import json
 import os
 import re
+from collections.abc import Iterator
 from pathlib import PurePosixPath
 from urllib.parse import unquote, urljoin, urlsplit
 
@@ -15,52 +19,68 @@ import qrcode
 import requests
 from lxml import etree
 
-from qstheory2pdf.types import Article, ContentBlock, TextRole, TocEntry, TocResult
+from qstheory2pdf.domain import reconstruction_status, validate_article
+from qstheory2pdf.types import (
+    Article,
+    BodyElement,
+    CatalogIssue,
+    FigureBlock,
+    FigureImage,
+    InlineRun,
+    Issue,
+    IssueCatalog,
+    IssueEntry,
+    IssueId,
+    ParagraphBlock,
+    ReconstructionProblem,
+    SourceDocument,
+    TableCell,
+    TextRole,
+)
 
-# Date pattern encoded in qstheory.cn article URLs: /YYYYMMDD/hash/c.html
-_DATE_URL_RE = re.compile(r"/(\d{4})(\d{2})(\d{2})/")
-
-# (connect, read) timeout for all HTTP requests — without this a stalled
-# connection hangs the CLI forever.
 _TIMEOUT = (10, 30)
-
-# TOC section headings (栏目) are short standalone lines like 文化中国 /
-# 深度调研 / 党员来信 / 统计图表 — no link, no punctuation, 2–8 chars.
+_SOURCE_ID_RE = re.compile(r"/([0-9a-fA-F]{32})/c\.html(?:$|[?#])")
+_ISSUE_PATTERNS = (
+    re.compile(r"《求是》\s*(\d{4})/(\d{1,2})"),
+    re.compile(r"(?:《求是》)?\s*(\d{4})\s*年第\s*(\d{1,2})\s*期"),
+)
 _COLUMN_TEXT_RE = re.compile(r"^[一-鿿]{2,8}$")
-# words that appear in short non-column lines (page furniture)
-_COLUMN_BLACKLIST = ("编辑", "校对", "审核", "来源", "作者", "封面", "目录",
-                     "上一篇", "下一篇", "分享", "打印", "返回", "相关", "推荐", "更多")
+_COLUMN_BLACKLIST = (
+    "编辑", "校对", "审核", "来源", "作者", "封面", "目录", "上一篇", "下一篇",
+    "分享", "打印", "返回", "相关", "推荐", "更多",
+)
+_SUPPORTED_BODY_TAGS = {
+    "p", "h2", "h3", "h4", "h5", "h6", "blockquote", "ul", "ol", "table", "figure", "picture",
+}
+_WRAPPER_TAGS = {"div", "section", "article", "main"}
+_UNSUPPORTED_SUBSTANTIVE_TAGS = {
+    "video", "audio", "iframe", "canvas", "svg", "object", "embed", "math", "pre", "dl",
+}
+
+
+class SourceClassificationError(ValueError):
+    """Raised when a source page does not express one known domain kind."""
 
 
 class QiuShiCrawler:
-    """Crawl article metadata and content from qstheory.cn.
-
-    The crawler writes images (article figures + QR code) into `image_dir` and
-    returns paths relative to that directory in the emitted Article. The caller
-    (typically PDFGenerator) owns the lifecycle of `image_dir`.
-    """
-
     def __init__(self, image_dir: str = "./img") -> None:
         self.session = requests.Session()
-        # Identify ourselves; some servers reject unidentified clients.
         self.session.headers.setdefault(
-            "User-Agent", "qstheory2pdf/0.1 (+https://github.com/KaidLi/qstheory2pdf)"
+            "User-Agent", "qstheory2pdf/0.3 (+https://github.com/KaidLi/qstheory2pdf)"
         )
         self.image_dir = image_dir
 
-    # ---- helpers -------------------------------------------------------------
+    # ---- network and resources ---------------------------------------------
 
     def _get(self, url: str) -> requests.Response:
-        """GET with timeout; raise on HTTP error status."""
-        resp = self.session.get(url, timeout=_TIMEOUT)
-        resp.raise_for_status()
-        return resp
+        response = self.session.get(url, timeout=_TIMEOUT)
+        response.raise_for_status()
+        return response
 
     def _ensure_img_dir(self) -> None:
         os.makedirs(self.image_dir, exist_ok=True)
 
     def _download_img(self, url: str) -> str:
-        """Download image into image_dir, return filename relative to it."""
         self._ensure_img_dir()
         parsed = urlsplit(url)
         original = PurePosixPath(unquote(parsed.path)).name
@@ -88,556 +108,911 @@ class QiuShiCrawler:
             }.get(content_type, ".jpg")
             data = response.content
 
-        fname = prefix + extension
-        path = os.path.join(self.image_dir, fname)
+        filename = prefix + extension
+        path = os.path.join(self.image_dir, filename)
         if not os.path.exists(path):
             if data is None:
                 data = self._get(url).content
-            with open(path, "wb") as f:
-                f.write(data)
-        return fname
+            with open(path, "wb") as stream:
+                stream.write(data)
+        return filename
 
     @staticmethod
     def _is_qr_img(src: str) -> bool:
         return "zxcode" in src.lower()
 
-    @staticmethod
-    def _detect_formatting(p_el) -> dict:
-        """Detect formatting characteristics of a <p> element.
-
-        *bold* is only True when <strong> wraps the ENTIRE paragraph text.
-        Inline <strong> inside longer text is handled at the LaTeX layer and
-        does NOT set the bold flag.
-        """
-        style = p_el.get("style", "").lower()
-        # normalize whitespace so "text-align: right" and "text-align:right"
-        # both match
-        style_norm = re.sub(r"\s+", "", style)
-        full_text = p_el.xpath("string(.)").strip()
-        strong_text = "".join(p_el.xpath(".//strong//text()")).strip()
-        is_entirely_bold = bool(strong_text) and strong_text == full_text
-
-        # extract font-family from descendant <span> styles
-        font_family = ""
-        for span in p_el.xpath(".//span"):
-            span_style = (span.get("style") or "").lower()
-            if "楷体" in span_style or "kaiti" in span_style:
-                font_family = "kai"
-                break
-            elif "黑体" in span_style or "heiti" in span_style or "simhei" in span_style:
-                font_family = "hei"
-                break
-            elif "宋体" in span_style or "simsun" in span_style:
-                font_family = "song"
-                break
-            elif "仿宋" in span_style or "fangsong" in span_style:
-                font_family = "fang"
-                break
-
-        # extract numeric font-size from p style
-        font_size = 0
-        m = re.search(r"font-size:\s*(\d+)px", style)
-        if m:
-            font_size = int(m.group(1))
-
-        return {
-            "center": "text-align:center" in style_norm,
-            # right/left alignment declared inline on the <p> (same mechanism
-            # the site uses for centering); left also covers text-indent:0
-            # (letter salutations like 编辑同志： are flush-left, no indent)
-            "right": "text-align:right" in style_norm,
-            "left": ("text-align:left" in style_norm
-                     or re.search(r"text-indent:0(?:em|px|pt)?(?:;|$)", style_norm) is not None),
-            "bold": is_entirely_bold,
-            "italic": bool(p_el.xpath(".//em")),
-            "large": bool(re.search(r"font-size:\s*(1[89]|2[0-9]|3[0-9])px", style)),
-            "font_family": font_family,
-            "font_size": font_size,
-        }
-
-    @staticmethod
-    def _text_role(
-        text: str,
-        *,
-        bold: bool,
-        center: bool,
-        large: bool,
-        salutation: bool,
-        signature: bool,
-    ) -> TextRole:
-        """Classify a paragraph by meaning instead of appearance alone."""
-        if salutation:
-            return "salutation"
-        if signature:
-            return "signature"
-        numbered_heading = re.match(
-            r"^(?:"
-            r"[一二三四五六七八九十百]+[、．.]"
-            r"|第[一二三四五六七八九十百\d]+[章节篇部分]"
-            r"|[（(]?[一二三四五六七八九十百]+[）)]"
-            r"|\d+[、．.]"
-            r")",
-            text,
-        )
-        if bold and (center or large or numbered_heading):
-            return "section_heading"
-        return "body"
-
-    @staticmethod
-    def _extract_date_from_url(url: str) -> str:
-        """Extract YYYY-MM-DD from qstheory.cn article URL."""
-        m = _DATE_URL_RE.search(url)
-        if not m:
-            return ""
-        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-
-    @staticmethod
-    def _extract_json_ld_metadata(html) -> dict[str, str]:
-        """从 JSON-LD 中提取标题、作者和期号回退值。"""
-        result = {"title": "", "author": "", "volume": ""}
-        candidates: list[dict] = []
-        for raw in html.xpath('//script[@type="application/ld+json"]/text()'):
-            try:
-                value = json.loads(raw)
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if isinstance(value, dict):
-                graph = value.get("@graph")
-                if isinstance(graph, list):
-                    candidates.extend(item for item in graph if isinstance(item, dict))
-                candidates.append(value)
-            elif isinstance(value, list):
-                candidates.extend(item for item in value if isinstance(item, dict))
-
-        for item in candidates:
-            if not result["title"]:
-                result["title"] = str(item.get("headline") or item.get("name") or "").strip()
-            if not result["author"]:
-                author = item.get("author")
-                if isinstance(author, dict):
-                    result["author"] = str(author.get("name") or "").strip()
-                elif isinstance(author, list):
-                    names = [
-                        str(value.get("name") or "").strip()
-                        for value in author
-                        if isinstance(value, dict)
-                    ]
-                    result["author"] = "、".join(name for name in names if name)
-                elif isinstance(author, str):
-                    result["author"] = author.strip()
-            if not result["volume"]:
-                serialized = json.dumps(item, ensure_ascii=False)
-                match = re.search(r"《求是》\d{4}/\d{1,2}", serialized)
-                if match:
-                    result["volume"] = match.group(0)
-        return result
-
-    # ---- public API ----------------------------------------------------------
-
     def download_toc_cover(self, url: str) -> str | None:
-        """Download the best available cover image from the TOC page.
-
-        Returns the filename (relative to image_dir), or None if no suitable
-        image found.
-        """
-        resp = self._get(url)
-        resp.encoding = "utf-8"
-        html = etree.HTML(resp.text)
-        imgs = html.xpath('//div[contains(@class,"content")]//img')
-        for img in imgs:
-            candidates = []
-            srcset = img.get("srcset", "")
+        response = self._get(url)
+        response.encoding = "utf-8"
+        html = etree.HTML(response.text)
+        for image in html.xpath('//div[contains(@class,"content")]//img'):
+            candidates: list[str] = []
+            srcset = image.get("srcset", "")
             if srcset:
-                parsed_srcset = []
+                weighted: list[tuple[float, str]] = []
                 for item in srcset.split(","):
                     parts = item.strip().split()
                     if not parts:
                         continue
                     descriptor = parts[1] if len(parts) > 1 else "1x"
                     match = re.match(r"(\d+(?:\.\d+)?)(?:w|x)?$", descriptor)
-                    score = float(match.group(1)) if match else 0.0
-                    parsed_srcset.append((score, parts[0]))
-                if parsed_srcset:
-                    candidates.append(max(parsed_srcset)[1])
+                    weighted.append((float(match.group(1)) if match else 0.0, parts[0]))
+                if weighted:
+                    candidates.append(max(weighted)[1])
             for attribute in ("data-original", "data-src", "src"):
-                value = (img.get(attribute) or "").strip()
+                value = (image.get(attribute) or "").strip()
                 if value:
                     candidates.append(value)
             for candidate in candidates:
                 if not self._is_qr_img(candidate):
                     return self._download_img(urljoin(url, candidate))
-
         for candidate in html.xpath('//meta[@property="og:image"]/@content'):
-            candidate = candidate.strip()
-            if candidate and not self._is_qr_img(candidate):
-                return self._download_img(urljoin(url, candidate))
+            if candidate.strip() and not self._is_qr_img(candidate):
+                return self._download_img(urljoin(url, candidate.strip()))
         return None
+
+    # ---- source document classification -----------------------------------
+
+    def fetch_document(self, url: str, *, with_qr: bool = False) -> SourceDocument:
+        """Fetch a source exactly once and return its semantic document kind."""
+        response = self._get(url)
+        response.encoding = "utf-8"
+        html = etree.HTML(response.text)
+        if html is None:
+            raise SourceClassificationError("来源没有可解析的 HTML")
+
+        catalog = self._parse_catalog(html, url)
+        if catalog is not None:
+            return {"kind": "issue_catalog", "catalog": catalog}
+
+        issue = self._parse_issue(html, url)
+        if issue is not None:
+            return {"kind": "issue_contents", "issue": issue}
+
+        if self._looks_like_article(html):
+            article = self._parse_article(html, url, with_qr=with_qr)
+            return {"kind": "article", "article": article}
+
+        raise SourceClassificationError("无法把来源识别为文章、官方期次目录或期次目录集")
+
+    def fetch_info(self, url: str, *, with_qr: bool = False) -> Article:
+        """Fetch one source that must semantically classify as an article."""
+        document = self.fetch_document(url, with_qr=with_qr)
+        if document["kind"] != "article":
+            raise SourceClassificationError(
+                f"来源不是文章，而是 {document['kind']}"
+            )
+        return document["article"]
+
+    @classmethod
+    def _looks_like_article(cls, html) -> bool:
+        has_heading = bool(
+            html.xpath("//h1")
+            or html.xpath('//meta[@property="og:title"]/@content')
+            or html.xpath('//meta[@name="title"]/@content')
+            or cls._json_ld_metadata(html)["title"]
+        )
+        has_content = bool(html.xpath('//div[contains(@class,"content")]'))
+        return has_heading and has_content
+
+    # ---- common metadata ---------------------------------------------------
+
+    @staticmethod
+    def _normal_text(value: str) -> str:
+        return re.sub(r"\s+", " ", value or "").strip()
+
+    @classmethod
+    def _source_id(cls, url: str) -> str:
+        match = _SOURCE_ID_RE.search(url)
+        return match.group(1).lower() if match else ""
+
+    @classmethod
+    def _canonical_url(cls, html, base_url: str) -> str:
+        values = (
+            html.xpath('//link[contains(concat(" ", normalize-space(@rel), " "), " canonical ")]/@href')
+            or html.xpath('//meta[@property="og:url"]/@content')
+        )
+        return urljoin(base_url, values[0].strip()) if values and values[0].strip() else base_url
+
+    @classmethod
+    def _issue_id_from_text(cls, text: str) -> IssueId | None:
+        for pattern in _ISSUE_PATTERNS:
+            match = pattern.search(text)
+            if match:
+                return {
+                    "publication_year": int(match.group(1)),
+                    "issue_number": int(match.group(2)),
+                }
+        return None
+
+    @staticmethod
+    def _date_from_text(value: str) -> str:
+        match = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", value.strip())
+        if not match:
+            match = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日", value.strip())
+        if not match:
+            return ""
+        return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
+
+    @classmethod
+    def _declared_date(cls, html) -> str:
+        values = (
+            html.xpath('//meta[@property="article:published_time"]/@content')
+            or html.xpath('//meta[@name="datePublished"]/@content')
+            or html.xpath('//meta[@name="publishdate"]/@content')
+        )
+        values.extend(
+            html.xpath(
+                '//*[contains(concat(" ", normalize-space(@class), " "), " pubtime ")]/text()'
+            )
+        )
+        for value in values:
+            declared = cls._date_from_text(value)
+            if declared:
+                return declared
+
+        for item in cls._json_ld_items(html):
+            value = item.get("datePublished")
+            if isinstance(value, str):
+                declared = cls._date_from_text(value)
+                if declared:
+                    return declared
+        return ""
+
+    @classmethod
+    def _declared_issue_date(cls, html) -> str:
+        """Return only an explicitly labelled date for the issue itself."""
+        meta_values = html.xpath(
+            '//meta[@name="issue_publication_date" or @name="issue:publication_date" '
+            'or @property="issue:publication_date"]/@content'
+        )
+        for value in meta_values:
+            declared = cls._date_from_text(value)
+            if declared:
+                return declared
+
+        for element in html.xpath("//span | //p | //time | //div[not(*)]"):
+            text = cls._normal_text(element.xpath("string(.)"))
+            if not re.search(r"(?:本期)?(?:出版|发行|刊行)日期", text):
+                continue
+            declared = cls._date_from_text(text)
+            if declared:
+                return declared
+        return ""
+
+    @staticmethod
+    def _json_ld_items(html) -> list[dict]:
+        items: list[dict] = []
+        for raw in html.xpath('//script[@type="application/ld+json"]/text()'):
+            try:
+                value = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            values = value if isinstance(value, list) else [value]
+            for candidate in values:
+                if not isinstance(candidate, dict):
+                    continue
+                graph = candidate.get("@graph")
+                if isinstance(graph, list):
+                    items.extend(item for item in graph if isinstance(item, dict))
+                items.append(candidate)
+        return items
+
+    @classmethod
+    def _json_ld_metadata(cls, html) -> dict[str, str]:
+        result = {"title": "", "byline": "", "issue_label": ""}
+        for item in cls._json_ld_items(html):
+            if not result["title"]:
+                result["title"] = cls._normal_text(str(item.get("headline") or item.get("name") or ""))
+            if not result["byline"]:
+                author = item.get("author")
+                if isinstance(author, dict):
+                    result["byline"] = cls._normal_text(str(author.get("name") or ""))
+                elif isinstance(author, list):
+                    names = [
+                        cls._normal_text(str(value.get("name") or ""))
+                        for value in author if isinstance(value, dict)
+                    ]
+                    result["byline"] = "、".join(name for name in names if name)
+                elif isinstance(author, str):
+                    result["byline"] = cls._normal_text(author)
+            if not result["issue_label"]:
+                serialized = json.dumps(item, ensure_ascii=False)
+                match = re.search(r"《求是》\d{4}/\d{1,2}", serialized)
+                if match:
+                    result["issue_label"] = match.group(0)
+        return result
+
+    # ---- catalogs and issue contents --------------------------------------
+
+    def _parse_catalog(self, html, url: str) -> IssueCatalog | None:
+        found: dict[tuple[int, int], CatalogIssue] = {}
+        for anchor in html.xpath("//a[@href]"):
+            issue_id = self._issue_id_from_text(self._normal_text(anchor.xpath("string(.)")))
+            if issue_id is None:
+                continue
+            source_url = urljoin(url, anchor.get("href", "").strip())
+            key = (issue_id["publication_year"], issue_id["issue_number"])
+            found[key] = {"id": issue_id, "source_url": source_url}
+        headings = [
+            self._normal_text(element.xpath("string(.)"))
+            for element in html.xpath("//h1 | //title")
+        ]
+        explicit_catalog = (
+            "mulu" in url.lower()
+            or any(
+                re.fullmatch(r"《?求是》?\s*\d{4}\s*年", heading)
+                or "年度目录" in heading
+                or "全年目录" in heading
+                for heading in headings
+            )
+        )
+        if not explicit_catalog:
+            return None
+        issues = [found[key] for key in sorted(found)]
+        catalog: IssueCatalog = {"source_url": url, "issues": issues}
+        years = {item["id"]["publication_year"] for item in issues}
+        if len(years) == 1:
+            catalog["publication_year"] = next(iter(years))
+        return catalog
 
     @classmethod
     def _looks_like_column_heading(cls, text: str) -> bool:
-        """True if a link-less TOC line looks like a 栏目 heading.
-
-        2026 TOC design: 栏目 names are short standalone lines (文化中国 /
-        深度调研 / 学习问答 / 党员来信 / 党刊精选 / 统计图表 …) between the
-        entry rows, not inline "栏目│标题" prefixes as in the old design.
-        """
-        norm = re.sub(r"\s+", "", text)
-        if not _COLUMN_TEXT_RE.match(norm):
-            return False
-        return not any(w in norm for w in _COLUMN_BLACKLIST)
-
-    def fetch_toc(self, url: str) -> TocResult:
-        """Fetch a magazine issue TOC page in a single HTTP request.
-
-        Walks block-level elements of the content area in document order:
-        blocks containing article links become entries; short link-less
-        lines in between are 栏目 headings and are attached to the entries
-        that follow them (matching the printed magazine's section layout).
-
-        Returns:
-            {"urls": [list of article URLs in order],
-             "entries": [parallel list of TocEntry dicts, may be shorter]}
-        """
-        resp = self._get(url)
-        resp.encoding = "utf-8"
-        html = etree.HTML(resp.text)
-
-        # Block-level walk in document order. Entries are usually <p>, but
-        # some sections (发现于 2026/14: 党员来信 等尾部栏目) sit in other
-        # wrappers — include li/h2/h3/h4 and div-with-direct-link so no
-        # section is skipped.
-        blocks = html.xpath(
-            '//div[contains(@class,"content")]'
-            '//*[self::p or self::li or self::h2 or self::h3 or self::h4'
-            ' or (self::div and a and not(.//p) and not(.//li))]'
+        normalized = re.sub(r"\s+", "", text)
+        return bool(_COLUMN_TEXT_RE.match(normalized)) and not any(
+            word in normalized for word in _COLUMN_BLACKLIST
         )
 
-        seen_urls: set[str] = set()
-        seen_entry_urls: set[str] = set()
-        urls: list[str] = []
-        entries: list[TocEntry] = []
-        current_column = ""
+    def _parse_issue(self, html, url: str) -> Issue | None:
+        identity_elements = html.xpath(
+            "//h1 | //span[contains(concat(' ', normalize-space(@class), ' '), ' appellation ')]"
+        )
+        issue_id = None
+        for element in identity_elements:
+            issue_id = self._issue_id_from_text(
+                self._normal_text(element.xpath("string(.)"))
+            )
+            if issue_id is not None:
+                break
+        if issue_id is None:
+            return None
+        containers = html.xpath('//div[contains(@class,"content")]')
+        if not containers:
+            return None
 
-        for b in blocks:
-            hrefs = [urljoin(url, h) for h in b.xpath(".//a/@href")]
-            art_hrefs = [h for h in hrefs if "/c.html" in h and h != url]
-
-            if art_hrefs:
-                for h in art_hrefs:
-                    if h not in seen_urls:
-                        seen_urls.add(h)
-                        urls.append(h)
-                entry = self._parse_toc_paragraph(b, url)
-                if entry is not None and entry["url"] != url \
-                        and entry["url"] not in seen_entry_urls:
-                    if not entry["column"]:
-                        entry["column"] = current_column
-                    seen_entry_urls.add(entry["url"])
-                    entries.append(entry)
-            else:
-                text = b.xpath("string(.)").strip()
+        entries: list[IssueEntry] = []
+        problems: list[ReconstructionProblem] = []
+        current_label = ""
+        for block in self._content_blocks(containers[0], issue_mode=True):
+            anchors = [anchor for anchor in block.xpath(".//a[@href]") if "/c.html" in anchor.get("href", "")]
+            if not anchors:
+                text = self._normal_text(block.xpath("string(.)"))
                 if text and self._looks_like_column_heading(text):
-                    current_column = text
+                    current_label = text
+                continue
 
-        # Safety net: catch article links living outside the walked block
-        # types (unknown wrappers) so no article is silently dropped —
-        # entry.py synthesizes a TOC row from the article page for these.
-        for h in html.xpath('//div[contains(@class,"content")]//a/@href'):
-            ab = urljoin(url, h)
-            if "/c.html" in ab and ab != url and ab not in seen_urls:
-                seen_urls.add(ab)
-                urls.append(ab)
+            block_text = self._normal_text(block.xpath("string(.)"))
+            if not block_text and block.xpath(".//img"):
+                # Image-only links at the end of issue pages lead to archive
+                # catalogs; official issue entries are textual rows.
+                continue
+            anchor = anchors[0]
+            source_url = urljoin(url, anchor.get("href", "").strip())
+            if source_url == url:
+                continue
+            source_id = self._source_id(source_url)
+            title_values = block.xpath(".//strong//text()")
+            directory_title = self._normal_text(" ".join(title_values))
+            if not directory_title:
+                directory_title = self._normal_text(anchor.xpath("string(.)"))
+            inline_label = ""
+            if "│" in directory_title:
+                inline_label, directory_title = (
+                    part.strip() for part in directory_title.split("│", 1)
+                )
+            if not inline_label:
+                for span in anchor.xpath('.//span[contains(@style,"楷体") or contains(@style,"KaiTi")]'):
+                    span_text = self._normal_text(span.xpath("string(.)"))
+                    if (span.tail or "").lstrip().startswith("│") and span_text:
+                        inline_label = span_text
+                        break
+                    match = re.fullmatch(r"[（(]([^（）()]{2,8})[）)]", span_text)
+                    if match:
+                        inline_label = match.group(1)
+                        if directory_title.endswith(span_text):
+                            directory_title = directory_title[:-len(span_text)].rstrip()
+                        break
+            full_text = self._normal_text(block.xpath("string(.)"))
+            directory_subtitle = ""
+            for extra_anchor in anchors[1:]:
+                extra_text = self._normal_text(extra_anchor.xpath("string(.)"))
+                if extra_text and extra_text != directory_title:
+                    directory_subtitle = extra_text
+                    break
+            if not directory_subtitle:
+                subtitle_match = re.search(r"(——[^/]+?)(?:\s*/|$)", full_text)
+                if subtitle_match:
+                    directory_subtitle = subtitle_match.group(1).strip()
+            byline = ""
+            slash = full_text.rfind("/")
+            if slash >= 0:
+                byline = full_text[slash + 1:].strip()
+            entry: IssueEntry = {
+                "ordinal": len(entries) + 1,
+                "source_article_id": source_id,
+                "source_url": source_url,
+            }
+            if directory_title:
+                entry["directory_title"] = directory_title
+            if directory_subtitle:
+                entry["directory_subtitle"] = directory_subtitle
+            if byline:
+                entry["directory_byline"] = byline
+            if inline_label or current_label:
+                entry["section_label"] = inline_label or current_label
+            current_label = ""
+            if not source_id:
+                problems.append({
+                    "code": "missing_entry_article_id",
+                    "message": "官方目录条目没有可识别的来源文章标识",
+                    "location": f"entries[{entry['ordinal']}]",
+                })
+            entries.append(entry)
 
-        return {"urls": urls, "entries": entries}
+        heading_text = self._normal_text(" ".join(
+            heading.xpath("string(.)") for heading in html.xpath("//h1")
+        ))
+        heading_issue_id = self._issue_id_from_text(heading_text)
+        heading_declares_issue = bool(
+            heading_issue_id
+            and "求是" in heading_text
+            and (
+                "目录" in heading_text
+                or re.fullmatch(
+                    r"《?求是》?\s*\d{4}\s*年第\s*\d{1,2}\s*期",
+                    heading_text,
+                )
+            )
+        )
+        has_visible_heading = bool(html.xpath("//h1"))
+        if (
+            (has_visible_heading and not heading_declares_issue)
+            or (not has_visible_heading and len(entries) < 2)
+        ):
+            return None
+        if not entries:
+            problems.append({
+                "code": "missing_issue_entries",
+                "message": "官方期次目录中没有取得任何入刊条目",
+            })
+        issue: Issue = {
+            "id": issue_id,
+            "source_url": url,
+            "entries": entries,
+            "reconstruction": reconstruction_status(problems),
+        }
+        declared_date = self._declared_issue_date(html)
+        if declared_date:
+            issue["publication_date"] = declared_date
+        return issue
+
+    # ---- article extraction ------------------------------------------------
+
+    def _parse_article(self, html, url: str, *, with_qr: bool) -> Article:
+        canonical_url = self._canonical_url(html, url)
+        json_ld = self._json_ld_metadata(html)
+        headings = html.xpath("//h1")
+        visible_title = self._normal_text(headings[0].xpath("string(.)")) if headings else ""
+        fallback_titles = [
+            *html.xpath('//meta[@property="og:title"]/@content'),
+            *html.xpath('//meta[@name="title"]/@content'),
+            json_ld["title"],
+        ]
+        title = visible_title or next(
+            (self._normal_text(value) for value in fallback_titles if self._normal_text(value)),
+            "",
+        )
+
+        issue_label = ""
+        byline_parts: list[str] = []
+        for element in html.xpath('//span[contains(concat(" ", normalize-space(@class), " "), " appellation ")]'):
+            text = self._normal_text(element.xpath("string(.)"))
+            if text.startswith("来源") and "求是" in text and not issue_label:
+                match = re.search(r"《求是》\d{4}/\d{1,2}", text)
+                issue_label = match.group(0) if match else text.removeprefix("来源：").removeprefix("来源")
+            elif text.startswith("作者"):
+                value = re.sub(r"^作者[：:]?", "", text).strip()
+                if value:
+                    byline_parts.append(value)
+        byline = "、".join(byline_parts)
+        if not byline:
+            byline_values = [
+                *html.xpath('//meta[@name="author"]/@content'),
+                *html.xpath('//meta[@property="article:author"]/@content'),
+                json_ld["byline"],
+            ]
+            byline = next(
+                (self._normal_text(value) for value in byline_values if self._normal_text(value)),
+                "",
+            )
+        if not issue_label:
+            descriptions = [
+                *html.xpath('//meta[@name="description"]/@content'),
+                *html.xpath('//meta[@property="og:description"]/@content'),
+                json_ld["issue_label"],
+            ]
+            for description in descriptions:
+                match = re.search(r"《求是》\d{4}/\d{1,2}", description)
+                if match:
+                    issue_label = match.group(0)
+                    break
+
+        article: Article = {
+            "source_id": self._source_id(canonical_url) or self._source_id(url),
+            "source_url": canonical_url,
+            "title": title,
+            "body": [],
+            "reconstruction": reconstruction_status(),
+        }
+        if byline:
+            article["byline"] = byline
+        if issue_label:
+            article["issue_label"] = issue_label
+        declared_date = self._declared_date(html)
+        if declared_date:
+            article["source_publication_date"] = declared_date
+
+        containers = html.xpath('//div[contains(@class,"content")]')
+        problems: list[ReconstructionProblem] = []
+        if containers:
+            candidates = list(self._content_blocks(containers[0], issue_mode=False))
+            article["body"] = self._extract_body(
+                candidates,
+                canonical_url,
+                title=title,
+                byline=byline,
+                issue_label=issue_label,
+                article=article,
+                problems=problems,
+            )
+        else:
+            problems.append({"code": "missing_content_container", "message": "没有找到正文容器"})
+        article["reconstruction"] = reconstruction_status(problems)
+        article["reconstruction"] = validate_article(article)
+        if with_qr:
+            try:
+                article["qrcode"] = self._gen_qr(canonical_url)
+            except OSError:
+                # QR codes are optional rendition resources, not source body.
+                pass
+        return article
+
+    def _content_blocks(self, container, *, issue_mode: bool) -> Iterator:
+        def walk(node) -> Iterator:
+            for child in node:
+                tag = str(child.tag).lower() if isinstance(child.tag, str) else ""
+                if issue_mode and tag in {"ul", "ol"}:
+                    for list_item in child.xpath("./li"):
+                        yield list_item
+                elif tag in _SUPPORTED_BODY_TAGS or (not issue_mode and tag == "img") or (issue_mode and tag in {"li", "h1"}):
+                    yield child
+                elif tag in {"script", "style", "noscript", "template"}:
+                    continue
+                elif tag in _WRAPPER_TAGS:
+                    yielded = False
+                    for descendant in walk(child):
+                        yielded = True
+                        yield descendant
+                    if not yielded and self._normal_text(child.xpath("string(.)")):
+                        yield child
+                elif (
+                    self._normal_text(child.xpath("string(.)"))
+                    or child.xpath(".//img")
+                    or tag in _UNSUPPORTED_SUBSTANTIVE_TAGS
+                ):
+                    yield child
+        yield from walk(container)
 
     @staticmethod
-    def _parse_toc_paragraph(p, base_url: str) -> TocEntry | None:
-        links = p.xpath(".//a")
-        if not links:
-            return None
-        href = urljoin(base_url, links[0].get("href", ""))
-        if "/c.html" not in href:
-            return None
-
-        # title from <strong>; fall back to the link's own text (some 2026
-        # rows carry no <strong>)
-        strongs = p.xpath(".//strong//text()")
-        title = " ".join(t.strip() for t in strongs).strip()
-        if not title:
-            title = links[0].xpath("string(.)").strip()
-        if not title:
-            return None
-
-        # legacy inline column (2025 design): 楷体 span followed by │ inside
-        # the <a>. 2026 pages use standalone heading lines instead (handled
-        # by fetch_toc); keep this for backward compatibility.
-        column = ""
-        kaishu_spans = p.xpath(
-            './/span[contains(@style,"楷体") or contains(@style,"KaiTi")]'
-        )
-        for ks in kaishu_spans:
-            ks_text = ks.xpath("string(.)").strip()
-            if not ks_text:
-                continue
-            parent = ks.getparent()
-            tail = (ks.tail or "").lstrip()
-            if parent is not None and parent.tag == "a" and tail.startswith("│"):
-                column = ks_text
+    def _formatting(element) -> tuple[str, str, int, bool]:
+        style = (element.get("style") or "").lower()
+        normalized = re.sub(r"\s+", "", style)
+        if "text-align:right" in normalized:
+            alignment = "right"
+        elif "text-align:center" in normalized:
+            alignment = "center"
+        elif "text-align:left" in normalized or "text-indent:0" in normalized:
+            alignment = "left"
+        else:
+            alignment = "default"
+        family = ""
+        for descendant in [element, *element.xpath(".//*")]:
+            value = (descendant.get("style") or "").lower()
+            if "楷体" in value or "kaiti" in value:
+                family = "kai"
                 break
-
-        # 2026 variant: parenthetical column suffix inside the <a> AFTER the
-        # title, e.g. <a><strong>多一些“想法子办”</strong><span style="…楷体…">
-        # （党员来信）</span></a> — observed on the real 2026/14 TOC page.
-        # The title comes from <strong> only, so it stays clean.
-        if not column:
-            for ks in kaishu_spans:
-                parent = ks.getparent()
-                if parent is None or parent.tag != "a":
-                    continue
-                ks_text = ks.xpath("string(.)").strip()
-                m = re.fullmatch(r"[（(]([^（）()]{2,8})[）)]", ks_text)
-                if m:
-                    column = m.group(1)
-                    break
-
-        # subtitle from second link after <br/> or ——
-        subtitle = ""
-        for a in links[1:]:
-            a_text = a.xpath("string(.)").strip()
-            if a_text and a_text != title:
-                subtitle = a_text
+            if "黑体" in value or "heiti" in value or "simhei" in value:
+                family = "hei"
                 break
-
-        if not subtitle:
-            full_text = p.xpath("string(.)").strip()
-            m = re.search(r"(——[^/]+?)(?:\s*/|$)", full_text)
-            if m:
-                subtitle = m.group(1).strip()
-
-        # author / author_role from 楷体 span after /
-        # The slash may sit outside the span (…</a> /<span>作者</span>) or
-        # inside it (<span>/习近平</span>) — strip a leading slash from the
-        # span text before matching.
-        author = ""
-        author_role = ""
-        parent_text = p.xpath("string(.)").strip()
-        slash_pos = parent_text.rfind("/")
-        for ks in kaishu_spans:
-            ks_text = ks.xpath("string(.)").strip().lstrip("/").strip()
-            if not ks_text:
-                continue
-            if slash_pos >= 0:
-                after_slash = parent_text[slash_pos + 1:].strip()
-                if ks_text in after_slash:
-                    if author:
-                        author_role = author
-                    author = ks_text
-
-        # plain-text author fallback (2026 rows: "<strong>标题</strong> /作者"
-        # with no 楷体 span): take the text after the last slash
-        if not author and slash_pos >= 0:
-            candidate = parent_text[slash_pos + 1:].strip()
-            if candidate and len(candidate) <= 40 and "http" not in candidate:
-                author = candidate
-
-        return {
-            "title": title,
-            "column": column,
-            "subtitle": subtitle,
-            "author": author,
-            "author_role": author_role,
-            "url": href,
-        }
-
-    def fetch_info(self, url: str, *, with_qr: bool = False) -> Article:
-        """Extract metadata and content from a single article page.
-
-        Returns an Article TypedDict. Image paths inside `content` and the
-        optional `qrcode` field are relative to `self.image_dir`.
-        """
-        resp = self._get(url)
-        resp.encoding = "utf-8"
-        html = etree.HTML(resp.text)
-
-        json_ld = self._extract_json_ld_metadata(html)
-
-        # ---- title -----------------------------------------------------------
-        title_values = (
-            html.xpath("//h1/text()")
-            or html.xpath('//meta[@property="og:title"]/@content')
-            or html.xpath('//meta[@name="title"]/@content')
-        )
-        title = (title_values or [json_ld["title"]])[0].strip()
-        title = re.sub(r"\s+", " ", title)
-
-        # ---- volume / author from appellation spans --------------------------
-        app_els = html.xpath('//span[@class="appellation"]')
-        volume = ""
-        author = ""
-        for el in app_els:
-            text = el.xpath("string(.)").strip()
-            if text.startswith("来源") and "求是" in text:
-                volume = text[2:]
-                m = re.search(r"《求是》\d{4}/\d{2}", volume)
-                volume = m.group(0) if m else volume
-            elif text.startswith("作者"):
-                author = text[3:]
-
-        if not author:
-            author_values = (
-                html.xpath('//meta[@name="author"]/@content')
-                or html.xpath('//meta[@property="article:author"]/@content')
-            )
-            author = (author_values or [json_ld["author"]])[0].strip()
-        if not volume:
-            description_values = (
-                html.xpath('//meta[@name="description"]/@content')
-                or html.xpath('//meta[@property="og:description"]/@content')
-            )
-            description = (description_values or [""])[0]
-            match = re.search(r"《求是》\d{4}/\d{1,2}", description)
-            volume = match.group(0) if match else json_ld["volume"]
-
-        # ---- content paragraphs ----------------------------------------------
-        content_ps = html.xpath(
-            '//div[contains(@class,"content")]//p'
-        )
-
-        # ---- subtitle / body_start detection in preamble --------------------
-        # The first few <p>s repeat column/title/subtitle/author; the author
-        # line marks the end of that preamble. Compare with ALL whitespace
-        # stripped: two-char names are spaced out on the page ("文 平" vs
-        # appellation "文平"). Scan only the first few paragraphs — letters
-        # end with a spaced signature that would otherwise match and swallow
-        # the whole body; articles without a preamble correctly keep 0.
-        subtitle = ""
-        body_start = 0
-        norm_author = re.sub(r"\s+", "", author)
-        for i, p in enumerate(content_ps[:5]):
-            text = p.xpath("string(.)").strip()
-            style = (p.get("style") or "").lower()
-
-            if author and re.sub(r"\s+", "", text) == norm_author:
-                body_start = i + 1
+            if "仿宋" in value or "fangsong" in value:
+                family = "fang"
                 break
-            if not author and i >= 1:
-                body_start = i
+            if "宋体" in value or "simsun" in value:
+                family = "song"
                 break
+        size_match = re.search(r"font-size:\s*(\d+)px", style)
+        font_size = int(size_match.group(1)) if size_match else 0
+        full_text = QiuShiCrawler._normal_text(element.xpath("string(.)"))
+        strong_text = QiuShiCrawler._normal_text("".join(element.xpath(".//strong//text()")))
+        return alignment, family, font_size, bool(strong_text and strong_text == full_text)
 
-            # detect subtitle: centered bold paragraph starting with ——
-            if text.startswith("——") and "center" in style:
-                subtitle = text
+    def _inline_runs(self, element, base_url: str) -> list[InlineRun]:
+        runs: list[InlineRun] = []
 
-        result: Article = {
-            "title": title,
-            "subtitle": subtitle,
-            "author": author,
-            "volume": volume,
-            "date": self._extract_date_from_url(url),
-            "url": url,
-            "content": [],
-        }
+        def append(text: str | None, strong: bool, emphasis: bool, href: str) -> None:
+            if not text:
+                return
+            normalized = re.sub(r"\s+", " ", text)
+            if not normalized:
+                return
+            run: InlineRun = {"text": normalized, "strong": strong, "emphasis": emphasis}
+            if href:
+                run["href"] = href
+            if runs and all(runs[-1].get(key) == run.get(key) for key in ("strong", "emphasis", "href")):
+                runs[-1]["text"] = runs[-1].get("text", "") + normalized
+            else:
+                runs.append(run)
 
-        first_text_block = True
-        i = body_start
-        while i < len(content_ps):
-            p = content_ps[i]
-            text = p.xpath("string(.)").strip()
-
-            img_tags = p.xpath(".//img")
-            if img_tags:
-                # Collect non-QR images and look for a caption
-                images: list[tuple[str, str]] = []
-                for img in img_tags:
-                    src = img.get("src", "")
-                    if self._is_qr_img(src):
-                        continue
-                    img_url = urljoin(url, src)
-                    local = self._download_img(img_url)
-                    caption = img.get("alt", "").strip() or text
-                    images.append((local, caption))
-
-                # If no caption found, peek at next paragraph — on qstheory.cn,
-                # image captions are often in a following FangSong/KaiTi <p>
-                caption = images[0][1] if images else ""
-                if not caption and i + 1 < len(content_ps):
-                    next_p = content_ps[i + 1]
-                    next_text = next_p.xpath("string(.)").strip()
-                    next_fmt = self._detect_formatting(next_p)
-                    if next_fmt["font_family"] in ("fang", "kai") and not next_p.xpath(".//strong"):
-                        caption = next_text
-                        i += 1  # consume the caption paragraph
-
-                for local, img_caption in images:
-                    block: ContentBlock = {
-                        "img": local,
-                        "caption": caption or img_caption,
-                    }
-                    result["content"].append(block)
-            elif text:
-                fmt = self._detect_formatting(p)
-                # raw text content; gen_pdf.py applies LaTeX escaping
-                # detect author attribution for right-alignment
-                is_right = fmt["right"] or text.startswith("作者") or text.startswith("（作者")
-                # letter salutation (信件抬头 "编辑同志："): short first body
-                # line ending with a full-width colon — flush left, no indent
-                is_left = fmt["left"]
-                is_salutation = bool(
-                    first_text_block
-                    and re.fullmatch(r"[^：:，。；]{1,10}[：:]", text)
+        def walk(node, strong: bool, emphasis: bool, href: str) -> None:
+            append(node.text, strong, emphasis, href)
+            for child in node:
+                tag = str(child.tag).lower() if isinstance(child.tag, str) else ""
+                style = re.sub(r"\s+", "", (child.get("style") or "").lower())
+                child_strong = strong or tag in {"strong", "b"} or bool(
+                    re.search(r"font-weight:(?:bold|[6-9]00)", style)
                 )
-                if is_salutation:
-                    is_left = True
+                child_emphasis = (
+                    emphasis
+                    or tag in {"em", "i"}
+                    or "font-style:italic" in style
+                    or "font-style:oblique" in style
+                )
+                child_href = href
+                if tag == "a":
+                    raw_href = (child.get("href") or "").strip()
+                    if raw_href and not raw_href.startswith(("javascript:", "#")):
+                        child_href = urljoin(base_url, raw_href)
+                if tag != "img":
+                    walk(child, child_strong, child_emphasis, child_href)
+                append(child.tail, strong, emphasis, href)
 
-                if text:
-                    role = self._text_role(
-                        text,
-                        bold=fmt["bold"],
-                        center=fmt["center"],
-                        large=fmt["large"],
-                        salutation=is_salutation,
-                        signature=is_right,
-                    )
-                    block: ContentBlock = {
-                        "text": text,
-                        "bold": fmt["bold"],
-                        "italic": fmt["italic"],
-                        "center": fmt["center"],
-                        "large": fmt["large"],
-                        "right": is_right,
-                        "left": is_left,
-                        "font_family": fmt["font_family"],  # type: ignore[typeddict-item]
-                        "font_size": fmt["font_size"],
-                        "role": role,
-                    }
-                    result["content"].append(block)
-                    first_text_block = False
-            i += 1
+        root_tag = str(element.tag).lower() if isinstance(element.tag, str) else ""
+        root_style = re.sub(r"\s+", "", (element.get("style") or "").lower())
+        root_strong = root_tag in {"strong", "b"} or bool(
+            re.search(r"font-weight:(?:bold|[6-9]00)", root_style)
+        )
+        root_emphasis = (
+            root_tag in {"em", "i"}
+            or "font-style:italic" in root_style
+            or "font-style:oblique" in root_style
+        )
+        walk(element, root_strong, root_emphasis, "")
+        while runs and not runs[0].get("text", "").strip():
+            runs.pop(0)
+        while runs and not runs[-1].get("text", "").strip():
+            runs.pop()
+        if runs:
+            runs[0]["text"] = runs[0].get("text", "").lstrip()
+            runs[-1]["text"] = runs[-1].get("text", "").rstrip()
+        return [run for run in runs if run.get("text")]
 
-        # ---- letter signature (信件署名) ------------------------------------
-        # Letters close with "单位名 作者名" as the LAST paragraph, right-
-        # aligned on the page. If the final text block ends with the author
-        # name and is short, right-align it (styles are not always inline).
-        if author:
-            for block in reversed(result["content"]):
-                if "text" in block:
-                    norm_text = re.sub(r"\s+", "", block["text"])
-                    if (norm_text.endswith(norm_author)
-                            and len(norm_text) <= 30
-                            and not block.get("center")):
-                        block["right"] = True
-                        block["role"] = "signature"
-                    break
+    @staticmethod
+    def _runs_text(runs: list[InlineRun]) -> str:
+        return "".join(run.get("text", "") for run in runs).strip()
 
-        if with_qr:
-            result["qrcode"] = self._gen_qr(url)
+    def _paragraph(
+        self,
+        element,
+        base_url: str,
+        *,
+        first_text: bool,
+        byline: str,
+    ) -> ParagraphBlock | None:
+        runs = self._inline_runs(element, base_url)
+        text = self._runs_text(runs)
+        if not text:
+            return None
+        alignment, family, size, _visual_bold = self._formatting(element)
+        textual_runs = [run for run in runs if run.get("text", "").strip()]
+        fully_strong = bool(textual_runs) and all(
+            run.get("strong", False) for run in textual_runs
+        )
+        tag = str(element.tag).lower()
+        role: TextRole = "body"
+        if first_text and re.fullmatch(r"[^：:，。；]{1,10}[：:]", text):
+            role = "salutation"
+            alignment = "left"
+        elif (
+            byline
+            and re.sub(r"\s+", "", text).endswith(re.sub(r"\s+", "", byline))
+            and len(text) <= 40
+        ):
+            role = "signature"
+            alignment = "right"
+        elif (
+            tag in {"h2", "h3", "h4", "h5", "h6"}
+            or (alignment == "center" and re.fullmatch(r"[一二三四五六七八九十百]+", text))
+            or (
+                fully_strong
+                and len(text) <= 80
+                and re.match(r"^(?:[一二三四五六七八九十百]+[、．.]|第.+[章节篇部分]|[（(][一二三四五六七八九十百]+[）)]|\d+[、．.])", text)
+            )
+        ):
+            role = "section_heading"
+        return {
+            "kind": "paragraph",
+            "role": role,
+            "runs": runs,
+            "alignment": alignment,  # type: ignore[typeddict-item]
+            "font_family": family,
+            "font_size": size,
+        }
 
-        return result
+    def _has_substantive_image(self, element) -> bool:
+        element_tag = str(element.tag).lower() if isinstance(element.tag, str) else ""
+        image_nodes = [element] if element_tag == "img" else element.xpath(".//img")
+        for image in image_nodes:
+            values = [
+                (image.get(attribute) or "").strip()
+                for attribute in ("data-original", "data-src", "src")
+            ]
+            values.extend(
+                part.strip().split()[0]
+                for part in (image.get("srcset") or "").split(",")
+                if part.strip()
+            )
+            if any(value and not self._is_qr_img(value) for value in values):
+                return True
+        return False
 
-    # ---- QR code -------------------------------------------------------------
+    def _unmodeled_nested_reason(self, element, container_kind: str) -> str:
+        if self._has_substantive_image(element):
+            return "容器内图像尚不能在原位置保真重建"
+
+        disallowed = set(_UNSUPPORTED_SUBSTANTIVE_TAGS)
+        disallowed.update({"figure", "picture"})
+        if container_kind == "list":
+            disallowed.update({"ul", "ol", "table", "blockquote"})
+            for item in element.xpath(".//li"):
+                if len(item.xpath("./p")) > 1:
+                    return "多段列表项尚不能保真重建"
+        elif container_kind == "table":
+            disallowed.update({"ul", "ol", "table", "blockquote"})
+        elif container_kind == "quote":
+            disallowed.update({"ul", "ol", "table", "blockquote"})
+
+        for descendant in element.xpath(".//*"):
+            if not isinstance(descendant.tag, str):
+                continue
+            tag = str(descendant.tag).lower()
+            if tag in disallowed:
+                return f"{container_kind} 内嵌 {tag} 尚不能保真重建"
+        return ""
+
+    def _figure(
+        self,
+        element,
+        base_url: str,
+        problems: list[ReconstructionProblem],
+        location: str,
+    ) -> FigureBlock | None:
+        images: list[FigureImage] = []
+        element_tag = str(element.tag).lower() if isinstance(element.tag, str) else ""
+        image_nodes = [element] if element_tag == "img" else element.xpath(".//img")
+        for image in image_nodes:
+            raw_src = ""
+            weighted_sources: list[tuple[float, str]] = []
+            for item in (image.get("srcset") or "").split(","):
+                parts = item.strip().split()
+                if not parts:
+                    continue
+                descriptor = parts[1] if len(parts) > 1 else "1x"
+                match = re.match(r"(\d+(?:\.\d+)?)(?:w|x)?$", descriptor)
+                weighted_sources.append(
+                    (float(match.group(1)) if match else 0.0, parts[0])
+                )
+            if weighted_sources:
+                raw_src = max(weighted_sources)[1]
+            if not raw_src:
+                raw_src = next(
+                    (
+                        (image.get(attribute) or "").strip()
+                        for attribute in ("data-original", "data-src", "src")
+                        if (image.get(attribute) or "").strip()
+                    ),
+                    "",
+                )
+            if not raw_src or self._is_qr_img(raw_src):
+                continue
+            try:
+                local = self._download_img(urljoin(base_url, raw_src))
+            except (requests.RequestException, OSError) as error:
+                problems.append({
+                    "code": "image_download_failed",
+                    "message": f"正文图像下载失败: {error}",
+                    "location": location,
+                })
+                images.append({
+                    "src": "",
+                    "source_url": urljoin(base_url, raw_src),
+                    "alt": self._normal_text(image.get("alt", "")),
+                    "missing": True,
+                })
+                continue
+            images.append({
+                "src": local,
+                "source_url": urljoin(base_url, raw_src),
+                "alt": self._normal_text(image.get("alt", "")),
+                "missing": False,
+            })
+        caption_nodes = element.xpath(".//figcaption")
+        caption = self._inline_runs(caption_nodes[0], base_url) if caption_nodes else []
+        if not caption:
+            caption = self._inline_runs(element, base_url)
+        if not images:
+            return None
+        return {"kind": "figure", "images": images, "caption": caption}
+
+    def _extract_body(
+        self,
+        candidates: list,
+        base_url: str,
+        *,
+        title: str,
+        byline: str,
+        issue_label: str,
+        article: Article,
+        problems: list[ReconstructionProblem],
+    ) -> list[BodyElement]:
+        body: list[BodyElement] = []
+        skip_values = {value for value in (title, byline, issue_label) if value}
+        first_text = True
+        index = 0
+        while index < len(candidates):
+            element = candidates[index]
+            tag = str(element.tag).lower() if isinstance(element.tag, str) else ""
+            location = f"body-source[{index + 1}]"
+            text = self._normal_text(element.xpath("string(.)"))
+            css_class = (element.get("class") or "").lower()
+
+            if (
+                "扫描二维码分享到手机" in text
+                or text.startswith("网站编辑")
+                or "fs-text" in css_class
+                or css_class in {"weibo", "qzone"}
+                or text == "【网站声明】"
+            ):
+                break
+            if index < 8 and (
+                text in skip_values
+                or text.rstrip("※*") in skip_values
+                or "appellation" in css_class
+                or "pubtime" in css_class
+                or (tag in {"h1", "h2"} and not text)
+            ):
+                index += 1
+                continue
+            if index < 8 and text.startswith("——") and tag == "p":
+                article["subtitle"] = text
+                index += 1
+                continue
+
+            if tag in {"p", "figure", "picture", "img"} and (tag == "img" or element.xpath(".//img")):
+                figure = self._figure(element, base_url, problems, location)
+                if figure is not None:
+                    if not figure["caption"] and index + 1 < len(candidates):
+                        next_element = candidates[index + 1]
+                        next_tag = str(next_element.tag).lower() if isinstance(next_element.tag, str) else ""
+                        _alignment, family, _size, _bold = self._formatting(next_element)
+                        if next_tag == "p" and family in {"fang", "kai"} and not next_element.xpath(".//img"):
+                            figure["caption"] = self._inline_runs(next_element, base_url)
+                            index += 1
+                    body.append(figure)
+                elif self._has_substantive_image(element):
+                    body.append({
+                        "kind": "unsupported",
+                        "source_tag": tag,
+                        "reason": "图版未能取得任何正文图像",
+                    })
+                index += 1
+                continue
+
+            if tag in {"p", "h2", "h3", "h4", "h5", "h6"}:
+                paragraph = self._paragraph(element, base_url, first_text=first_text, byline=byline)
+                if paragraph is not None:
+                    body.append(paragraph)
+                    first_text = False
+                elif any(
+                    str(descendant.tag).lower() in _UNSUPPORTED_SUBSTANTIVE_TAGS
+                    for descendant in element.xpath(".//*")
+                    if isinstance(descendant.tag, str)
+                ):
+                    body.append({
+                        "kind": "unsupported",
+                        "source_tag": tag,
+                        "reason": "段落包含尚不能保真重建的嵌入正文",
+                    })
+            elif tag in {"ul", "ol"}:
+                items = [self._inline_runs(item, base_url) for item in element.xpath("./li")]
+                items = [item for item in items if self._runs_text(item)]
+                if items:
+                    body.append({"kind": "list", "ordered": tag == "ol", "items": items})
+                reason = self._unmodeled_nested_reason(element, "list")
+                if reason:
+                    body.append({
+                        "kind": "unsupported",
+                        "source_tag": tag,
+                        "reason": reason,
+                    })
+            elif tag == "table":
+                rows: list[list[TableCell]] = []
+                for row in element.xpath(".//tr"):
+                    cells: list[TableCell] = []
+                    for cell in row.xpath("./th|./td"):
+                        cells.append({
+                            "runs": self._inline_runs(cell, base_url),
+                            "header": str(cell.tag).lower() == "th",
+                            "rowspan": max(1, int(cell.get("rowspan", "1")))
+                            if cell.get("rowspan", "1").isdigit() else 1,
+                            "colspan": max(1, int(cell.get("colspan", "1")))
+                            if cell.get("colspan", "1").isdigit() else 1,
+                        })
+                    if cells:
+                        rows.append(cells)
+                if rows:
+                    body.append({"kind": "table", "rows": rows})
+                reason = self._unmodeled_nested_reason(element, "table")
+                if reason:
+                    body.append({
+                        "kind": "unsupported",
+                        "source_tag": tag,
+                        "reason": reason,
+                    })
+            elif tag == "blockquote":
+                paragraph_elements = element.xpath(".//p")
+                paragraphs = [
+                    self._inline_runs(paragraph, base_url)
+                    for paragraph in paragraph_elements
+                ]
+                paragraphs = [
+                    paragraph for paragraph in paragraphs
+                    if self._runs_text(paragraph)
+                ]
+                if not paragraphs:
+                    runs = self._inline_runs(element, base_url)
+                    if runs:
+                        paragraphs = [runs]
+                if paragraphs:
+                    body.append({"kind": "quote", "paragraphs": paragraphs})
+                reason = self._unmodeled_nested_reason(element, "quote")
+                if reason:
+                    body.append({
+                        "kind": "unsupported",
+                        "source_tag": tag,
+                        "reason": reason,
+                    })
+            else:
+                body.append({
+                    "kind": "unsupported",
+                    "source_tag": tag or "unknown",
+                    "reason": f"尚不能保真重建正文结构 <{tag or 'unknown'}>",
+                })
+            index += 1
+        return body
+
+    # ---- QR presentation resource -----------------------------------------
 
     def _gen_qr(self, url: str) -> str:
-        """Generate QR PNG into image_dir, return filename relative to it."""
         self._ensure_img_dir()
         qr = qrcode.QRCode(
             version=1,
@@ -647,8 +1022,7 @@ class QiuShiCrawler:
         )
         qr.add_data(url)
         qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
-        fname = "qrcode.png"
-        path = os.path.join(self.image_dir, fname)
-        img.save(path)
-        return fname
+        image = qr.make_image(fill_color="black", back_color="white")
+        filename = "qrcode.png"
+        image.save(os.path.join(self.image_dir, filename))
+        return filename

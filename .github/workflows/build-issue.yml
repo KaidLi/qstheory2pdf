@@ -118,16 +118,34 @@ jobs:
           build_pdf() {
             local dev="$1" suffix=""
             [ "$dev" != "normal" ] && suffix="-$dev"
-            uv run qstheory2pdf --strict -d "$dev" -f "$FONT" -o "output/${TAG}${suffix}.pdf" "$URL"
+            uv run qstheory2pdf \
+              --status-file "output/reconstruction-${dev}.json" \
+              -d "$dev" -f "$FONT" -o "output/${TAG}${suffix}.pdf" "$URL"
           }
           if [ "${{ steps.check.outputs.mode }}" = "epub-only" ]; then
-            uv run qstheory2pdf --strict --format epub -o "output/${TAG}.epub" "$URL"
+            uv run qstheory2pdf \
+              --status-file output/reconstruction-epub.json \
+              --format epub -o "output/${TAG}.epub" "$URL"
           elif [ "$DEVICE" = "both" ]; then
-            uv run qstheory2pdf --strict --format both -d normal -f "$FONT" -o "output/${TAG}" "$URL"
+            uv run qstheory2pdf \
+              --status-file output/reconstruction-normal.json \
+              --format both -d normal -f "$FONT" -o "output/${TAG}" "$URL"
             build_pdf scribe
           else
-            uv run qstheory2pdf --strict --format both -d "$DEVICE" -f "$FONT" -o "output/${TAG}" "$URL"
+            uv run qstheory2pdf \
+              --status-file "output/reconstruction-${DEVICE}.json" \
+              --format both -d "$DEVICE" -f "$FONT" -o "output/${TAG}" "$URL"
           fi
+
+      - name: Validate reconstruction completeness
+        if: steps.check.outputs.mode != 'skip'
+        run: |
+          shopt -s nullglob
+          statuses=(output/reconstruction-*.json)
+          [ "${#statuses[@]}" -gt 0 ] || { echo "缺少重建状态文件"; exit 1; }
+          for status in "${statuses[@]}"; do
+            jq -e '.state == "complete"' "$status"
+          done
 
       - name: Validate EPUB
         if: steps.check.outputs.mode != 'skip'

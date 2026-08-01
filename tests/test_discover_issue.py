@@ -42,8 +42,8 @@ class DiscoverIssueTest(unittest.TestCase):
         )
         year_page = _response(
             f"""
-            <a href="https://www.qstheory.cn/a">《求是》{year}年第2期</a>
-            <a href="https://www.qstheory.cn/b">《求是》{year}年第16期</a>
+            <a href="a">《求是》{year}年第2期</a>
+            <a href="/b">《求是》{year}年第16期</a>
             """
         )
         session = SimpleNamespace(get=Mock(side_effect=[archive, year_page]))
@@ -65,6 +65,12 @@ class DiscoverIssueTest(unittest.TestCase):
         )
 
         self.assertEqual("2026年第15期", result["volume"])
+
+    def test_manual_page_accepts_official_issue_heading_without_url_inference(self) -> None:
+        page = _response('<h1><span>《求是》2026年第8期</span></h1>')
+        session = SimpleNamespace(get=Mock(return_value=page))
+        result = discover_issue._extract_issue_from_page(session, "https://example.com/no-date")
+        self.assertEqual("2026年第08期", result["volume"])
 
 
 if __name__ == "__main__":
