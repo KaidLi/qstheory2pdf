@@ -17,7 +17,7 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertIn("jq -e '.state == \"complete\"'", workflow)
         self.assertNotIn("qstheory2pdf --strict", workflow)
         self.assertNotIn("--allow-partial", workflow)
-        self.assertIn("actions/setup-java@v4", workflow)
+        self.assertIn("actions/setup-java@v5", workflow)
         self.assertIn("EPUBCHECK_VERSION: '5.3.0'", workflow)
         self.assertLess(
             workflow.index("- name: Validate reconstruction completeness"),

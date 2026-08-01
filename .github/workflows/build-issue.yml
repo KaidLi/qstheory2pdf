@@ -40,10 +40,10 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v9
 
       # fonts-noto-cjk: 中文主字体（生僻字全覆盖，修复 祎/頔/赟 等缺字）
       # fonts-lxgw-wenkai: 楷体（作者/图注/引文），同样全覆盖
@@ -65,7 +65,7 @@ jobs:
         run: uv sync
 
       - name: Set up Java for EPUBCheck
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -180,7 +180,7 @@ jobs:
 
       - name: Upload publication artifacts
         if: steps.check.outputs.mode != 'skip'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.discover.outputs.tag }}
           path: |
@@ -190,7 +190,7 @@ jobs:
 
       - name: Upload build logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-logs-${{ steps.discover.outputs.tag }}
           path: |
