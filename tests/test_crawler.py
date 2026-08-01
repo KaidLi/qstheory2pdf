@@ -143,6 +143,83 @@ class MetadataFallbackTest(unittest.TestCase):
         )
         return crawler.fetch_info("https://www.qstheory.cn/20260801/hash/c.html")
 
+    def test_source_id_comes_from_url_hash(self) -> None:
+        crawler = QiuShiCrawler()
+        crawler._get = Mock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(
+                text=(
+                    "<html><head><meta property='og:title' content='t'/></head>"
+                    "<body><div class='content'><p>正文</p></div></body></html>"
+                ),
+                encoding="",
+            )
+        )
+        url = (
+            "https://www.qstheory.cn/20260801/"
+            "0123456789abcdef0123456789abcdef/c.html"
+        )
+        info = crawler.fetch_info(url)
+        self.assertEqual("0123456789abcdef0123456789abcdef", info["source_id"])
+        # 非 32 位十六进制 URL 不产生来源标识。
+        info_bad = crawler.fetch_info("https://www.qstheory.cn/20260801/hash/c.html")
+        self.assertEqual("", info_bad["source_id"])
+
+    def test_date_comes_from_official_meta_only(self) -> None:
+        """日期只取官方字段；URL 路径日期不得冒充发布日期。"""
+        crawler = QiuShiCrawler()
+        crawler._get = Mock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(
+                text=(
+                    "<html><head>"
+                    "<meta property='og:title' content='t'/>"
+                    "<meta name='publishdate' content='2026-08-02 10:00'/>"
+                    "</head><body><div class='content'><p>正文</p></div></body></html>"
+                ),
+                encoding="",
+            )
+        )
+        info = crawler.fetch_info(
+            "https://www.qstheory.cn/20260801/0123456789abcdef0123456789abcdef/c.html"
+        )
+        self.assertEqual("2026-08-02", info["date"])
+
+        crawler._get = Mock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(
+                text=(
+                    "<html><head><meta property='og:title' content='t'/></head>"
+                    "<body><div class='content'><p>正文</p></div></body></html>"
+                ),
+                encoding="",
+            )
+        )
+        info_no_date = crawler.fetch_info(
+            "https://www.qstheory.cn/20260801/0123456789abcdef0123456789abcdef/c.html"
+        )
+        self.assertEqual("", info_no_date["date"])
+
+    def test_toc_preserves_duplicate_entry_positions(self) -> None:
+        """同一文章出现在目录多个位置时全部保留，且带官方期次日期。"""
+        crawler = QiuShiCrawler()
+        shared = "https://www.qstheory.cn/20260801/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/c.html"
+        other = "https://www.qstheory.cn/20260801/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/c.html"
+        crawler._get = Mock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(
+                text=(
+                    f"<html><head><meta name='publishdate' content='2026-08-01'/></head>"
+                    "<body><div class='content'>"
+                    f"<p><a href='{shared}'><strong>第一处</strong></a></p>"
+                    f"<p><a href='{other}'><strong>第二篇</strong></a></p>"
+                    f"<p><a href='{shared}'><strong>第三处</strong></a></p>"
+                    "</div></body></html>"
+                ),
+                encoding="",
+            )
+        )
+        toc = crawler.fetch_toc("https://www.qstheory.cn/20260801/toc/c.html")
+        self.assertEqual([shared, other, shared], toc["urls"])
+        self.assertEqual(3, len(toc["entries"]))
+        self.assertEqual("2026-08-01", toc["issue_date"])
+
     def test_open_graph_and_meta_fallbacks(self) -> None:
         info = self._fetch(
             """

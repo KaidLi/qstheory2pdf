@@ -11,18 +11,20 @@ from unittest.mock import Mock, patch
 
 import requests
 
-from qstheory2pdf.entry import _issue_article_urls, _year_issue_links, main
+from qstheory2pdf.entry import _year_issue_links, main
 from qstheory2pdf.types import Article
 
 _URL = "https://www.qstheory.cn/20260801/toc/c.html"
 _ARTICLE_URLS = [
-    "https://www.qstheory.cn/20260801/one/c.html",
-    "https://www.qstheory.cn/20260801/two/c.html",
+    "https://www.qstheory.cn/20260801/11111111111111111111111111111111/c.html",
+    "https://www.qstheory.cn/20260801/22222222222222222222222222222222/c.html",
 ]
 _ARTICLE: Article = {
     "title": "完整文章",
     "volume": "《求是》2026/15",
     "date": "2026-08-01",
+    "source_id": "a" * 32,
+    "url": _ARTICLE_URLS[0],
     "content": [],
 }
 _ARTICLE["content"] = [
@@ -49,7 +51,7 @@ def _crawler() -> Mock:
     return crawler
 
 
-class EntryStrictModeTest(unittest.TestCase):
+class EntryCompletenessTest(unittest.TestCase):
     def test_strict_mode_stops_before_generation(self) -> None:
         crawler = _crawler()
         with (
@@ -68,34 +70,70 @@ class EntryStrictModeTest(unittest.TestCase):
         self.assertIn("整期内容不完整", output.getvalue())
         generator.assert_not_called()
 
-    def test_default_mode_generates_available_articles(self) -> None:
+    def test_default_mode_rejects_partial_issue(self) -> None:
+        """默认行为即拒绝部分重建（与 --strict 一致）。"""
+        crawler = _crawler()
+        with (
+            patch("qstheory2pdf.entry.QiuShiCrawler", return_value=crawler),
+            patch("qstheory2pdf.entry.EPUBGenerator") as generator,
+            patch("sys.argv", ["qstheory2pdf", "--format", "epub", _URL]),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            with self.assertRaises(SystemExit) as error:
+                main()
+
+        self.assertEqual(1, error.exception.code)
+        self.assertIn("整期内容不完整", output.getvalue())
+        generator.assert_not_called()
+
+    def test_allow_partial_generates_marked_issue(self) -> None:
+        """--allow-partial 生成带 -partial 标记的产物。"""
         crawler = _crawler()
         generator = Mock()
-        generator.gen_issue.return_value = "/tmp/partial.epub"
+        generator.gen_issue.return_value = "/tmp/marked.epub"
         with (
             patch("qstheory2pdf.entry.QiuShiCrawler", return_value=crawler),
             patch("qstheory2pdf.entry.EPUBGenerator", return_value=generator),
-            patch("sys.argv", ["qstheory2pdf", "--format", "epub", _URL]),
-            redirect_stdout(io.StringIO()),
+            patch(
+                "sys.argv",
+                ["qstheory2pdf", "--format", "epub", "--allow-partial", _URL],
+            ),
+            redirect_stdout(io.StringIO()) as output,
         ):
             main()
 
         generated_articles = generator.gen_issue.call_args.args[0]
         self.assertEqual(1, len(generated_articles))
         self.assertEqual(_URL, generator.gen_issue.call_args.kwargs["source_url"])
+        self.assertTrue(
+            generator.gen_issue.call_args.kwargs["output_path"].endswith(
+                "-partial.epub"
+            )
+        )
+        self.assertIn("部分重建", output.getvalue())
+
+    def test_single_flag_rejects_issue_source(self) -> None:
+        """--single 期望文章页；期次目录应报类型冲突。"""
+        crawler = _crawler()
+        with (
+            patch("qstheory2pdf.entry.QiuShiCrawler", return_value=crawler),
+            patch("qstheory2pdf.entry.EPUBGenerator"),
+            patch(
+                "sys.argv",
+                ["qstheory2pdf", "--format", "epub", "--single", _URL],
+            ),
+            redirect_stdout(io.StringIO()),
+            patch("sys.stderr", new_callable=io.StringIO) as err,
+        ):
+            with self.assertRaises(SystemExit) as error:
+                main()
+
+        self.assertEqual(1, error.exception.code)
+        self.assertIn("来源不是文章", err.getvalue())
+        crawler.fetch_info.assert_not_called()
 
 
 class YearIndexModeTest(unittest.TestCase):
-    def test_issue_links_allow_adjacent_publication_dates(self) -> None:
-        toc_url = "https://www.qstheory.cn/20260701/toc/c.html"
-        urls = [
-            "https://www.qstheory.cn/20260701/current/c.html",
-            "https://www.qstheory.cn/20260630/previous-day/c.html",
-            "https://www.qstheory.cn/20251231/year-index/c.html",
-        ]
-
-        self.assertEqual(urls[:2], _issue_article_urls(toc_url, urls))
-
     def test_year_issue_links_are_sorted_and_require_multiple_issues(self) -> None:
         entries = [
             {
@@ -201,7 +239,7 @@ class YearIndexModeTest(unittest.TestCase):
                 ],
                 output_paths,
             )
-            self.assertIn("年度索引模式: 共 2 期", output.getvalue())
+            self.assertIn("期次目录集模式: 共 2 期", output.getvalue())
 
 
 if __name__ == "__main__":

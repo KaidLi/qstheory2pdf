@@ -38,7 +38,11 @@ def _fetch_tree(session: requests.Session, url: str) -> html.HtmlElement:
 
 
 def _extract_issue_from_page(session: requests.Session, url: str) -> dict | None:
-    """Fetch a TOC page and extract the issue volume from metadata."""
+    """Fetch a TOC page and extract the issue volume from official metadata.
+
+    Authority order: span.appellation 卷期声明 → 页面标题（h1/title）中的
+    “YYYY年第N期” → meta 标题字段。URL 路径中的日期不构成期次身份。
+    """
     tree = _fetch_tree(session, url)
     for span in tree.xpath("//span[@class='appellation']"):
         text = span.text_content().strip()
@@ -46,6 +50,15 @@ def _extract_issue_from_page(session: requests.Session, url: str) -> dict | None
         if m:
             year, num = m.group(1), m.group(2)
             return _result(url, year, int(num))
+    for node in tree.xpath("//h1") + tree.xpath("//title"):
+        text = node.text_content().strip()
+        m = re.search(r"(\d{4})年第(\d+)期", text)
+        if m:
+            return _result(url, m.group(1), int(m.group(2)))
+    for meta in tree.xpath("//meta[@property='og:title']/@content"):
+        m = re.search(r"(\d{4})年第(\d+)期", meta.strip())
+        if m:
+            return _result(url, m.group(1), int(m.group(2)))
     return None
 
 
@@ -128,13 +141,8 @@ def main() -> None:
             url = sys.argv[1].strip()
             result = _extract_issue_from_page(session, url)
             if result is None:
-                m = re.search(r"/(\d{4})(\d{2})(\d{2})/", url)
-                if m:
-                    result = {
-                        "url": url,
-                        "volume": f"{m.group(1)}年{m.group(2)}月",
-                        "tag": f"qstheory-{m.group(1)}-{m.group(2)}",
-                    }
+                print(f"无法从给定 URL 识别官方期号: {url}", file=sys.stderr)
+                sys.exit(1)
 
         # --- Auto-discovery ---
         if result is None:

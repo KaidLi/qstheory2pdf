@@ -66,6 +66,33 @@ class DiscoverIssueTest(unittest.TestCase):
 
         self.assertEqual("2026年第15期", result["volume"])
 
+    def test_manual_page_falls_back_to_heading_declaration(self) -> None:
+        page = _response(
+            "<html><head><title>《求是》2026年第14期 - 求是网</title></head>"
+            "<body><h1>2026年第14期《求是》目录</h1></body></html>"
+        )
+        session = SimpleNamespace(get=Mock(return_value=page))
+
+        result = discover_issue._extract_issue_from_page(
+            session,
+            "https://www.qstheory.cn/issue",
+        )
+
+        self.assertEqual("2026年第14期", result["volume"])
+        self.assertEqual("qstheory-2026-14", result["tag"])
+
+    def test_manual_page_without_official_declaration_is_rejected(self) -> None:
+        """URL 路径日期不能构成期次身份：无法识别官方期号时直接失败。"""
+        page = _response("<html><body><p>无期号信息</p></body></html>")
+        session = SimpleNamespace(get=Mock(return_value=page))
+
+        self.assertIsNone(
+            discover_issue._extract_issue_from_page(
+                session,
+                "https://www.qstheory.cn/20260715/some/c.html",
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

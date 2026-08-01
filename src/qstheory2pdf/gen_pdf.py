@@ -391,19 +391,15 @@ class PDFGenerator:
         lines.append("")
 
         # ---- articles ----
-        # 栏目 lookup: TOC entries carry the column name; match by title.
-        # Entries may be a subset of the articles — skip silently on miss.
-        column_by_title = {
-            e["title"]: e["column"]
-            for e in (toc_entries or [])
-            if e.get("column") and e.get("title")
-        }
+        # 栏目按刊内次序与文章一一对应（manual TOC 的 \pageref 亦按次序），
+        # 不使用标题匹配身份；条目可能少于文章（部分重建），缺失时跳过栏目。
+        toc_columns = [e.get("column", "") for e in (toc_entries or [])]
         for idx, art in enumerate(articles):
             title = art.get("title", "")
             subtitle = art.get("subtitle", "")
             author = art.get("author", "")
             content = art.get("content", [])
-            column = column_by_title.get(title, "")
+            column = toc_columns[idx] if idx < len(toc_columns) else ""
 
             lines.append(r"\clearpage")
             lines.append(r"\pagestyle{fancy-note}")
