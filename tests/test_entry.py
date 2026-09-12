@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -11,7 +12,8 @@ from unittest.mock import Mock, patch
 
 import requests
 
-from qstheory2pdf.entry import _year_issue_links, main
+from qstheory2pdf.entry import _article_problems, _year_issue_links, main
+from qstheory2pdf.gen_pdf import PDFCompilationError
 from qstheory2pdf.types import Article
 
 _URL = "https://www.qstheory.cn/20260801/toc/c.html"
@@ -52,6 +54,93 @@ def _crawler() -> Mock:
 
 
 class EntryCompletenessTest(unittest.TestCase):
+    def test_metadata_whitespace_and_signature_are_not_substantive_body(self) -> None:
+        for content in (
+            [{"text": " \n\u3000"}],
+            [{"text": "完 整文章"}],
+            [{"text": "测试作者"}],
+            [{"text": "副标题"}],
+            [{"text": "某单位 测试作者", "role": "signature"}],
+            [{"img": ""}],
+            [{"img": "qrcode.png"}],
+            [{"img": "zxcode-123.png"}],
+            [{"text": "网站编辑 - 编辑名"}],
+        ):
+            with self.subTest(content=content):
+                info = dict(_ARTICLE, author="测试作者", subtitle="副标题",
+                            qrcode="qrcode.png", content=content)
+                self.assertIn("empty_content", [c for c, _ in _article_problems(info)])
+
+    def test_short_text_and_image_only_articles_remain_complete(self) -> None:
+        for content in ([{"text": "短正文。"}], [{"img": "figure.png", "caption": ""}]):
+            with self.subTest(content=content):
+                self.assertEqual([], _article_problems(dict(_ARTICLE, content=content)))
+
+    def test_metadata_only_build_obeys_default_and_partial_policy(self) -> None:
+        for single in (True, False):
+            for allow_partial in (False, True):
+                with self.subTest(single=single, allow_partial=allow_partial):
+                    crawler = Mock()
+                    crawler.fetch_toc.return_value = {
+                        "urls": [] if single else _ARTICLE_URLS, "entries": []
+                    }
+                    crawler.fetch_info.return_value = dict(
+                        _ARTICLE, content=[{"text": _ARTICLE["title"]}]
+                    )
+                    crawler.download_toc_cover.return_value = None
+                    generator = Mock()
+                    generator.gen_single.side_effect = lambda info, path: path
+                    generator.gen_issue.side_effect = lambda *a, **kw: kw["output_path"]
+                    with tempfile.TemporaryDirectory() as directory:
+                        status = Path(directory) / "status.json"
+                        argv = ["qstheory2pdf", "--format", "epub", "--status-file", str(status)]
+                        if allow_partial:
+                            argv.append("--allow-partial")
+                        argv.append(_URL)
+                        with (
+                            patch("qstheory2pdf.entry.QiuShiCrawler", return_value=crawler),
+                            patch("qstheory2pdf.entry.EPUBGenerator", return_value=generator) as factory,
+                            patch("sys.argv", argv), redirect_stdout(io.StringIO()),
+                        ):
+                            if allow_partial:
+                                main()
+                            else:
+                                with self.assertRaises(SystemExit) as error:
+                                    main()
+                                self.assertEqual(1, error.exception.code)
+                                factory.assert_not_called()
+                        payload = json.loads(status.read_text())
+                        self.assertEqual("partial" if allow_partial else "failed", payload["state"])
+                        self.assertTrue(payload["problems"])
+                        if allow_partial:
+                            self.assertTrue(payload["outputs"][0]["path"].endswith("-partial.epub"))
+
+    def test_pdf_failure_marks_status_failed_and_stops_both_formats(self) -> None:
+        crawler = Mock()
+        crawler.fetch_toc.return_value = {"urls": [], "entries": []}
+        crawler.fetch_info.return_value = _ARTICLE
+        pdf = Mock()
+        pdf.gen_single.side_effect = PDFCompilationError("xelatex failed (exit 1)")
+        with tempfile.TemporaryDirectory() as directory:
+            status = Path(directory, "status.json")
+            with (
+                patch("qstheory2pdf.entry.QiuShiCrawler", return_value=crawler),
+                patch("qstheory2pdf.entry.PDFGenerator", return_value=pdf),
+                patch("qstheory2pdf.entry.EPUBGenerator") as epub,
+                patch("sys.argv", ["qstheory2pdf", "--format", "both",
+                                   "--status-file", str(status), _URL]),
+                redirect_stdout(io.StringIO()),
+            ):
+                with self.assertRaises(SystemExit) as error:
+                    main()
+            self.assertEqual(1, error.exception.code)
+            epub.assert_not_called()
+            pdf.finish.assert_called_once()
+            payload = json.loads(status.read_text())
+            self.assertEqual("failed", payload["state"])
+            self.assertEqual([], payload["outputs"])
+            self.assertIn("exit 1", payload["problems"][0]["message"])
+
     def test_strict_mode_stops_before_generation(self) -> None:
         crawler = _crawler()
         with (

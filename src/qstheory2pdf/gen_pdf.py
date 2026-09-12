@@ -19,6 +19,10 @@ from qstheory2pdf.types import Article, ContentBlock, ImageBlock, TextBlock, Toc
 _LATEX_SPECIALS = ["&", "%", "#", "_", "$"]
 
 
+class PDFCompilationError(RuntimeError):
+    """A failed PDF build whose diagnostics survive temporary-file cleanup."""
+
+
 def _escape_latex(text: str) -> str:
     """Escape all LaTeX special characters in untrusted text.
 
@@ -153,6 +157,37 @@ class PDFGenerator:
 
     # ------------------------------------------------------------------ compile
 
+    def _compilation_error(
+        self, basename: str, message: str,
+        stdout: bytes | None = None, stderr: bytes | None = None,
+    ) -> PDFCompilationError:
+        """Save diagnostics outside workdir, which finish() always removes."""
+        assert self.workdir is not None
+        diagnostic = [message]
+        log_path = os.path.join(self.workdir, basename + ".log")
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as source:
+                diagnostic.append(source.read())
+        except OSError:
+            pass
+        for label, data in (("stdout", stdout), ("stderr", stderr)):
+            if data:
+                diagnostic.append(f"{label}:\n{data.decode('utf-8', errors='replace')}")
+        try:
+            directory = os.path.join(os.getcwd(), "output", "build-logs")
+            os.makedirs(directory, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", prefix="xelatex-", suffix=".log",
+                dir=directory, delete=False,
+            ) as saved:
+                saved.write("\n\n".join(diagnostic))
+                message += f"; 日志: {saved.name}"
+        except OSError as error:
+            # A logging failure must not replace the original compiler error.
+            message += f"; 无法保存日志: {error}"
+            message += "\n" + "\n".join("\n".join(diagnostic).splitlines()[-40:])
+        return PDFCompilationError(message)
+
     def _compile(self, basename: str, verbose: bool = True) -> None:
         """Run xelatex twice (for TOC/cross-refs)."""
         if self.workdir is None:
@@ -169,11 +204,16 @@ class PDFGenerator:
         env["PATH"] = tex_bin + os.pathsep + env.get("PATH", "")
 
         for i in range(2):
+            # Neither a prior build nor the first pass may supply the PDF
+            # used to judge the current pass. Auxiliary files are retained.
+            pdf_path = os.path.join(cwd, basename + ".pdf")
+            if os.path.exists(pdf_path):
+                os.remove(pdf_path)
             if verbose:
                 print(f"  编译 PDF (第{i+1}遍)...", end=" ", flush=True)
             try:
                 result = subprocess.run(
-                    [xelatex, "-interaction=nonstopmode", tex_file],
+                    [xelatex, "-interaction=nonstopmode", "-halt-on-error", tex_file],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     cwd=cwd,
@@ -181,23 +221,20 @@ class PDFGenerator:
                     check=False,
                     timeout=300,
                 )
-            except subprocess.TimeoutExpired:
-                raise RuntimeError(
-                    f"xelatex timed out after 300s (run {i + 1}/2)"
+            except subprocess.TimeoutExpired as error:
+                raise self._compilation_error(
+                    basename, f"xelatex timed out after 300s (run {i + 1}/2)",
+                    error.stdout, error.stderr,
                 ) from None
-            pdf_path = os.path.join(cwd, basename + ".pdf")
-            if result.returncode != 0 and not os.path.exists(pdf_path):
-                # Real error — PDF wasn't produced; print log for diagnostics
-                log_path = os.path.join(cwd, basename + ".log")
-                if os.path.exists(log_path):
-                    print("\n--- xelatex 错误日志 (末尾) ---")
-                    with open(log_path, "r", encoding="utf-8", errors="replace") as lf:
-                        lines = lf.readlines()
-                        for line in lines[-40:]:
-                            print(line.rstrip())
-                    print("--- 日志结束 ---")
-                raise RuntimeError(
-                    f"xelatex failed (exit {result.returncode}) and no PDF was generated"
+            if result.returncode != 0:
+                raise self._compilation_error(
+                    basename, f"xelatex failed (exit {result.returncode}, run {i + 1}/2)",
+                    result.stdout, result.stderr,
+                )
+            if not os.path.isfile(pdf_path) or os.path.getsize(pdf_path) == 0:
+                raise self._compilation_error(
+                    basename, f"xelatex produced no non-empty PDF (run {i + 1}/2)",
+                    result.stdout, result.stderr,
                 )
             if verbose:
                 # count pages from output for user feedback

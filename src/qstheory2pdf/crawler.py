@@ -549,29 +549,36 @@ class QiuShiCrawler:
         )
 
         # ---- subtitle / body_start detection in preamble --------------------
-        # The first few <p>s repeat column/title/subtitle/author; the author
-        # line marks the end of that preamble. Compare with ALL whitespace
-        # stripped: two-char names are spaced out on the page ("文 平" vs
-        # appellation "文平"). Scan only the first few paragraphs — letters
-        # end with a spaced signature that would otherwise match and swallow
-        # the whole body; articles without a preamble correctly keep 0.
+        # Consume only a confirmed, contiguous heading preamble. An absent
+        # byline does not imply a preamble; unsigned editorials can start
+        # directly with body text. Stop at the first unrecognized paragraph
+        # so a later signature cannot swallow the preceding body.
         subtitle = ""
         body_start = 0
         norm_author = re.sub(r"\s+", "", author)
+        norm_title = re.sub(r"\s+", "", title)
+        seen_title = False
         for i, p in enumerate(content_ps[:5]):
             text = p.xpath("string(.)").strip()
             style = (p.get("style") or "").lower()
-
-            if author and re.sub(r"\s+", "", text) == norm_author:
-                body_start = i + 1
+            if p.xpath(".//img"):
                 break
-            if not author and i >= 1:
-                body_start = i
-                break
-
-            # detect subtitle: centered bold paragraph starting with ——
-            if text.startswith("——") and "center" in style:
+            # A superscript note marker (e.g. ※) is not part of the title.
+            heading_text = "".join(p.xpath('.//text()[not(ancestor::sup)]'))
+            normalized = re.sub(r"\s+", "", heading_text)
+            if not text:
+                pass
+            elif norm_title and normalized == norm_title:
+                seen_title = True
+            elif norm_author and re.sub(r"\s+", "", text) == norm_author:
+                pass
+            elif (seen_title and text.startswith("——")
+                  and "text-align:center" in re.sub(r"\s+", "", style)
+                  and p.xpath(".//strong")):
                 subtitle = text
+            else:
+                break
+            body_start = i + 1
 
         result: Article = {
             "title": title,

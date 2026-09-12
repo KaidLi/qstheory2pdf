@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, call
+from unittest.mock import Mock, call, patch
 
 from qstheory2pdf.crawler import QiuShiCrawler
 
@@ -142,6 +142,50 @@ class MetadataFallbackTest(unittest.TestCase):
             return_value=SimpleNamespace(text=page, encoding="")
         )
         return crawler.fetch_info("https://www.qstheory.cn/20260801/hash/c.html")
+
+    def test_unsigned_article_keeps_every_body_paragraph(self) -> None:
+        # Same structure as the 2026/17 本期导读: no repeated title or byline.
+        info = self._fetch(
+            '<h1>本期导读</h1><div class="content">'
+            '<p>首段正文。</p><p>第二段正文。</p></div>'
+        )
+        self.assertEqual(
+            ["首段正文。", "第二段正文。"],
+            [block["text"] for block in info["content"]],
+        )
+
+    def test_preamble_is_removed_only_before_body_starts(self) -> None:
+        cases = [
+            ('<p>测试标题</p><p>正文。</p>', '', ["正文。"]),
+            ('<p>测试标题<sup>※</sup></p><p>测 试作者</p><p>正文。</p>',
+             '测试作者', ["正文。"]),
+            ('<p>正文。</p><p>测试作者</p>', '测试作者', ["正文。", "测试作者"]),
+            ('<p>正文。</p><p style="text-align:center">——正文中的引文</p>',
+             '', ["正文。", "——正文中的引文"]),
+        ]
+        for body, author, expected in cases:
+            with self.subTest(body=body):
+                info = self._fetch(
+                    f'<h1>测试标题</h1><meta name="author" content="{author}">'
+                    f'<div class="content">{body}</div>'
+                )
+                self.assertEqual(expected, [b["text"] for b in info["content"]])
+
+    def test_title_and_subtitle_without_body_are_not_content(self) -> None:
+        info = self._fetch(
+            '<h1>测试标题</h1><div class="content"><p>测试标题</p>'
+            '<p style="text-align:center"><strong>——副标题</strong></p></div>'
+        )
+        self.assertEqual("——副标题", info["subtitle"])
+        self.assertEqual([], info["content"])
+
+    def test_unsigned_image_article_keeps_first_figure(self) -> None:
+        with patch.object(QiuShiCrawler, "_download_img", return_value="figure.png"):
+            info = self._fetch(
+                '<h1>统计图表</h1><div class="content">'
+                '<p><img src="figure.png"></p><p>图表说明。</p></div>'
+            )
+        self.assertEqual("figure.png", info["content"][0]["img"])
 
     def test_source_id_comes_from_url_hash(self) -> None:
         crawler = QiuShiCrawler()

@@ -156,6 +156,10 @@ uv run qstheory2pdf -f wenkai <url>
 
 PDF 和 EPUB 默认保存到当前目录下的 `output/` 文件夹，文件名由文章标题或期号自动生成。年度索引模式按期号分别生成文件，`-o` 表示这一批文件的输出目录。生成完成后自动清理下载的临时图片与编译目录。
 
+PDF 编译任意一遍报错、超时，或没有生成非空 PDF 时都会停止；残留 PDF 不会被当作成功结果。失败诊断日志保存在当前目录的 `output/build-logs/`，临时目录清理后仍可查看。指定 `--status-file` 时，PDF 编译失败会记录为 `failed`（年度批量模式会汇总失败期次）。
+
+完整性检查要求至少一个实质正文块；空白、重复标题/副标题/作者、署名及已识别的二维码或编辑信息不能单独构成正文。短文章和只有正文图表的文章仍可通过检查；无署名文章会保留首段正文。
+
 ## GitHub Actions 自动发布
 
 项目配置了 GitHub Actions，每月 1 日和 16 日自动发现并构建最新一期《求是》的 PDF 与 EPUB，发布到 [Releases](https://github.com/KaidLi/qstheory2pdf/releases)。因此本地没有 LaTeX 也不影响 PDF 发布。

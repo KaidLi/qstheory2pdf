@@ -16,7 +16,7 @@ if hasattr(sys.stderr, "reconfigure"):
 import requests
 
 from qstheory2pdf import EPUBGenerator, PDFGenerator, QiuShiCrawler
-from qstheory2pdf.gen_pdf import _safe_name
+from qstheory2pdf.gen_pdf import PDFCompilationError, _safe_name
 from qstheory2pdf.types import Article, TocEntry, TocResult
 
 _YEAR_ISSUE_RE = re.compile(r"(\d{4})年第(\d+)期")
@@ -38,7 +38,28 @@ def _article_problems(info: Article) -> list[tuple[str, str]]:
         problems.append(("missing_source_id", "缺少来源文章标识"))
     if not (info.get("title") or "").strip():
         problems.append(("missing_title", "缺少标题"))
-    if not info.get("content"):
+    # Metadata and a closing signature cannot stand in for a body. Do not
+    # impose a length threshold: short text and image-only articles are valid.
+    heading_texts = {
+        re.sub(r"\s+", "", info.get(key, "") or "")
+        for key in ("title", "subtitle", "author")
+    }
+    has_body = False
+    for block in info.get("content", []):
+        if "img" in block:
+            image = block["img"].strip().replace("\\", "/")
+            qr = (info.get("qrcode") or "").replace("\\", "/")
+            if image and image != qr and "zxcode" not in image.lower():
+                has_body = True
+                break
+        else:
+            text = re.sub(r"\s+", "", block.get("text", ""))
+            is_editor_credit = re.match(r"^(?:网站编辑|责任编辑|校对|审校)[：:\-]", text)
+            if (text and text not in heading_texts
+                    and block.get("role") != "signature" and not is_editor_credit):
+                has_body = True
+                break
+    if not has_body:
         problems.append(("empty_content", "未提取到正文"))
     return problems
 
@@ -457,7 +478,7 @@ def main() -> None:
                     )
                     generated.extend(issue_generated)
                     all_problems.extend(problems)
-                except (IssueBuildError, requests.RequestException) as error:
+                except (IssueBuildError, PDFCompilationError, requests.RequestException) as error:
                     print(f"错误: {year} 年第 {number} 期生成失败: {error}")
                     failed_issues.append((year, number))
                     all_problems.append(
@@ -475,7 +496,7 @@ def main() -> None:
                 print(f"警告: 以下期号生成失败：{labels}")
             if not generated:
                 raise IssueBuildError("全年没有成功生成任何文件")
-    except IssueBuildError as error:
+    except (IssueBuildError, PDFCompilationError) as error:
         print(f"错误: {error}")
         if args.status_file:
             _write_status_file(
