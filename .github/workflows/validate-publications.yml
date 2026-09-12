@@ -1,0 +1,147 @@
+name: Validate publications
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/validate-publications.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-publications-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Fixed regression issue: its unsigned lead article used to lose paragraph 1.
+      ISSUE_URL: https://www.qstheory.cn/20260831/933ac0fd656e4adc8827cdc4d3dd6528/c.html
+      ARTICLE_URL: https://www.qstheory.cn/20260831/3bd8f5912e594acebb331c886ca49ecc/c.html
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install TeX Live and fonts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            texlive-xetex texlive-latex-recommended texlive-latex-extra \
+            texlive-fonts-recommended texlive-fonts-extra texlive-lang-chinese \
+            fonts-noto-cjk fonts-lxgw-wenkai poppler-utils
+
+      - name: Install dependencies and run regression tests
+        run: |
+          uv sync --locked
+          uv run python -m compileall -q src scripts tests
+          uv run python -m unittest discover -s tests -v
+
+      - name: Compile single article and issue publications
+        run: |
+          mkdir -p output
+          uv run qstheory2pdf --format both --status-file output/lead-status.json \
+            -o output/lead "$ARTICLE_URL"
+          uv run qstheory2pdf --format both --status-file output/issue-status.json \
+            -o output/qstheory-2026-17 "$ISSUE_URL"
+          uv run qstheory2pdf --format pdf -d scribe --status-file output/scribe-status.json \
+            -o output/qstheory-2026-17-scribe.pdf "$ISSUE_URL"
+
+      - name: Verify first paragraph and nonduplicated interview heading
+        run: |
+          uv run python - <<'PY'
+          import json
+          import re
+          import subprocess
+          import zipfile
+          from pathlib import Path
+          from lxml import etree
+
+          marker = "本期发表了习近平总书记重要文章"
+          interview_title = "着力打通制约国内大循环的卡点堵点"
+          interview_author = "《求是》杂志记者侯亚景"
+          for name in ("lead", "issue", "scribe"):
+              status = json.loads(Path(f"output/{name}-status.json").read_text())
+              assert status["state"] == "complete", status
+              assert not status["problems"], status
+          for name in ("lead.pdf", "qstheory-2026-17.pdf", "qstheory-2026-17-scribe.pdf"):
+              result = subprocess.run(
+                  ["pdftotext", f"output/{name}", "-"],
+                  check=True, capture_output=True, text=True,
+              )
+              assert marker in re.sub(r"\s+", "", result.stdout), name
+              print(f"Verified first paragraph in {name}")
+              if name != "lead.pdf":
+                  pages = [re.sub(r"\s+", "", page) for page in result.stdout.split('\f')]
+                  matches = [(i, page) for i, page in enumerate(pages, 1)
+                             if interview_title in page and "编者按" in page]
+                  assert len(matches) == 1, (name, "interview opening page", len(matches))
+                  page_number, page = matches[0]
+                  heading = page.split("编者按", 1)[0]
+                  assert heading.count(interview_title) == 1, (name, heading)
+                  assert heading.count(interview_author) == 1, (name, heading)
+                  assert "做强国内大循环" in page, name
+                  print(f"Verified unique interview heading and body in {name}, page {page_number}")
+                  if name == "qstheory-2026-17.pdf":
+                      subprocess.run([
+                          "pdftoppm", "-f", str(page_number), "-l", str(page_number),
+                          "-scale-to", "1600", "-singlefile", "-png",
+                          f"output/{name}", "output/interview-preview",
+                      ], check=True)
+          for name in ("lead.epub", "qstheory-2026-17.epub"):
+              with zipfile.ZipFile(f"output/{name}") as book:
+                  chapter = etree.fromstring(book.read("EPUB/text/article_001.xhtml"))
+                  text = "".join(chapter.itertext())
+                  assert marker in re.sub(r"\s+", "", text), name
+              print(f"Verified first paragraph in {name}")
+              if name != "lead.epub":
+                  interviews = []
+                  with zipfile.ZipFile(f"output/{name}") as book:
+                      for path in book.namelist():
+                          if not path.startswith("EPUB/text/article_") or not path.endswith(".xhtml"):
+                              continue
+                          tree = etree.fromstring(book.read(path))
+                          for article in tree.xpath('//*[local-name()="article"]'):
+                              titles = article.xpath('./*[local-name()="h1"]')
+                              if titles and interview_title in "".join(titles[0].itertext()):
+                                  interviews.append(re.sub(r"\s+", "", "".join(article.itertext())))
+                  assert len(interviews) == 1, (name, len(interviews))
+                  heading = interviews[0].split("编者按", 1)[0]
+                  assert heading.count(interview_title) == 1, heading
+                  assert heading.count(interview_author) == 1, heading
+                  assert "编者按" in interviews[0] and "做强国内大循环" in interviews[0], name
+                  print(f"Verified unique interview heading and body in {name}")
+          PY
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Validate EPUB containers
+        run: |
+          curl -fsSL -o /tmp/epubcheck.zip \
+            https://github.com/w3c/epubcheck/releases/download/v5.3.0/epubcheck-5.3.0.zip
+          unzip -q /tmp/epubcheck.zip -d /tmp
+          for book in output/*.epub; do
+            java -jar /tmp/epubcheck-5.3.0/epubcheck.jar "$book"
+          done
+
+      - name: Upload publications and diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: publication-validation-${{ github.run_id }}
+          path: output/
+          retention-days: 7
+          if-no-files-found: warn

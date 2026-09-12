@@ -549,29 +549,67 @@ class QiuShiCrawler:
         )
 
         # ---- subtitle / body_start detection in preamble --------------------
-        # The first few <p>s repeat column/title/subtitle/author; the author
-        # line marks the end of that preamble. Compare with ALL whitespace
-        # stripped: two-char names are spaced out on the page ("文 平" vs
-        # appellation "文平"). Scan only the first few paragraphs — letters
-        # end with a spaced signature that would otherwise match and swallow
-        # the whole body; articles without a preamble correctly keep 0.
+        # Consume only a confirmed, contiguous heading preamble. An absent
+        # byline does not imply a preamble; unsigned editorials can start
+        # directly with body text. Stop at the first unrecognized paragraph
+        # so a later signature cannot swallow the preceding body.
         subtitle = ""
         body_start = 0
         norm_author = re.sub(r"\s+", "", author)
-        for i, p in enumerate(content_ps[:5]):
+        norm_title = re.sub(r"\s+", "", title)
+        title_parts = re.split(r"[│|｜]", title, maxsplit=1)
+        column_title = None
+        if (len(title_parts) == 2
+                and self._looks_like_column_heading(title_parts[0])
+                and title_parts[1].strip()):
+            column_title = tuple(re.sub(r"\s+", "", part) for part in title_parts)
+
+        def heading_text(p) -> str:
+            # A superscript note marker (e.g. ※) is not part of the title.
+            return re.sub(r"\s+", "", "".join(
+                p.xpath('.//text()[not(ancestor::sup)]')
+            ))
+
+        seen_title = False
+        preamble_limit = min(5, len(content_ps))
+        while body_start < preamble_limit:
+            p = content_ps[body_start]
             text = p.xpath("string(.)").strip()
             style = (p.get("style") or "").lower()
-
-            if author and re.sub(r"\s+", "", text) == norm_author:
-                body_start = i + 1
+            if p.xpath(".//img"):
                 break
-            if not author and i >= 1:
-                body_start = i
+            normalized = heading_text(p)
+            if column_title and normalized == column_title[0]:
+                # Some pages split "栏目│标题" from h1 into two paragraphs.
+                # Consume them atomically only when the next nonblank paragraph
+                # matches the title; a short column-like body line is not enough.
+                next_index = body_start + 1
+                while next_index < preamble_limit:
+                    candidate = content_ps[next_index]
+                    if candidate.xpath(".//img") or candidate.xpath("string(.)").strip():
+                        break
+                    next_index += 1
+                if (next_index < preamble_limit
+                        and not content_ps[next_index].xpath(".//img")
+                        and heading_text(content_ps[next_index]) == column_title[1]):
+                    body_start = next_index + 1
+                    seen_title = True
+                    continue
                 break
-
-            # detect subtitle: centered bold paragraph starting with ——
-            if text.startswith("——") and "center" in style:
+            if not text:
+                pass
+            elif norm_title and (normalized == norm_title
+                                 or (column_title and normalized == column_title[1])):
+                seen_title = True
+            elif norm_author and re.sub(r"\s+", "", text) == norm_author:
+                pass
+            elif (seen_title and text.startswith("——")
+                  and "text-align:center" in re.sub(r"\s+", "", style)
+                  and p.xpath(".//strong")):
                 subtitle = text
+            else:
+                break
+            body_start += 1
 
         result: Article = {
             "title": title,
