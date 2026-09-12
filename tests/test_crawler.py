@@ -179,6 +179,60 @@ class MetadataFallbackTest(unittest.TestCase):
         self.assertEqual("——副标题", info["subtitle"])
         self.assertEqual([], info["content"])
 
+    def test_split_column_title_and_byline_are_not_body(self) -> None:
+        # The 2026/17 interview has a combined h1 but three heading paragraphs.
+        for separator in ("│", "|", "｜"):
+            for author in ("《求是》杂志记者 侯亚景", ""):
+                with self.subTest(separator=separator, author=author):
+                    byline = f'<p style="text-align:center">{author}</p>' if author else ''
+                    info = self._fetch(
+                        f'<h1>求是专访 {separator} 着力打通制约国内大循环的卡点堵点</h1>'
+                        f'<meta name="author" content="{author}">'
+                        '<div class="content"><p><strong>求是专访</strong></p><p> </p>'
+                        '<p style="text-align:center"><strong>'
+                        '着力打通制约国内大循环的卡点堵点<sup>※</sup></strong></p>'
+                        f'{byline}<p><strong>编者按：</strong>这是正文首段。</p>'
+                        '<p>记者：这是正文第二段。</p></div>'
+                    )
+                    self.assertEqual(
+                        ["编者按：这是正文首段。", "记者：这是正文第二段。"],
+                        [block["text"] for block in info["content"]],
+                    )
+
+    def test_unconfirmed_column_does_not_swallow_body(self) -> None:
+        for body in (
+            '<p>求是专访</p><p>这是真正的正文，不能跳过。</p><p>测试作者</p>',
+            '<p>正文先开始。</p><p>求是专访</p><p>测试标题</p><p>测试作者</p>',
+            '<p>求是专访</p><p><img src="figure.png"></p><p>测试标题</p>',
+        ):
+            with self.subTest(body=body), patch.object(
+                QiuShiCrawler, "_download_img", return_value="figure.png"
+            ):
+                info = self._fetch(
+                    '<h1>求是专访│测试标题</h1><meta name="author" content="测试作者">'
+                    f'<div class="content">{body}</div>'
+                )
+                self.assertEqual(
+                    "正文先开始。" if body.startswith('<p>正文') else "求是专访",
+                    info["content"][0]["text"],
+                )
+                if '<img' in body:
+                    self.assertEqual("figure.png", info["content"][1]["img"])
+
+    def test_split_heading_without_body_remains_empty(self) -> None:
+        info = self._fetch(
+            '<h1>求是专访│测试标题</h1><meta name="author" content="测试作者">'
+            '<div class="content"><p>求是专访</p><p>测试标题</p><p>测试作者</p></div>'
+        )
+        self.assertEqual([], info["content"])
+
+    def test_column_prefix_in_h1_does_not_require_column_paragraph(self) -> None:
+        info = self._fetch(
+            '<h1>求是专访│测试标题</h1><meta name="author" content="测试作者">'
+            '<div class="content"><p>测试标题</p><p>测试作者</p><p>正文。</p></div>'
+        )
+        self.assertEqual(["正文。"], [b["text"] for b in info["content"]])
+
     def test_unsigned_image_article_keeps_first_figure(self) -> None:
         with patch.object(QiuShiCrawler, "_download_img", return_value="figure.png"):
             info = self._fetch(
